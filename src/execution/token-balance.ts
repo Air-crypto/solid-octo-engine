@@ -32,6 +32,32 @@ export function tokenDeltaFromTransaction(input: {
   return tokenBalanceDelta(input.side, before, after);
 }
 
+export function nativeSolDeltaFromTransaction(input: {
+  transaction: ParsedTransactionWithMeta;
+  wallet: string;
+}): bigint {
+  const meta = input.transaction.meta;
+  if (!meta) throw new Error("confirmed transaction metadata is unavailable");
+  const index = input.transaction.transaction.message.accountKeys.findIndex(
+    ({ pubkey }) => pubkey.toBase58() === input.wallet,
+  );
+  if (index < 0) throw new Error("confirmed transaction omitted desk wallet");
+  const before = meta.preBalances[index];
+  const after = meta.postBalances[index];
+  if (before == null || after == null)
+    throw new Error("confirmed transaction omitted wallet SOL balances");
+  return BigInt(after) - BigInt(before);
+}
+
+export function feeLamportsFromTransaction(
+  transaction: ParsedTransactionWithMeta,
+): bigint {
+  const fee = transaction.meta?.fee;
+  if (fee == null || !Number.isSafeInteger(fee) || fee < 0)
+    throw new Error("confirmed transaction fee is unavailable");
+  return BigInt(fee);
+}
+
 function sumOwnerMint(
   balances: NonNullable<ParsedTransactionWithMeta["meta"]>["preTokenBalances"],
   wallet: string,

@@ -32,7 +32,7 @@ flowchart LR
 - Median SOL/USD mark with staleness, source-count, and spread gates. Dexscreener is not in the entry path.
 - On-chain mint/freeze authority, token program, canonical Pump curve owner/PDA, curve-excluded holder concentration, creator holdings, Rugcheck LP-lock percentage, and insider networks. Any required unknown is a kill.
 - One immutable buy intent per mint, short intent expiry, bounded spend, daily cap, position cap, wallet binding, risk/policy hashes, transaction simulation, and program allowlisting.
-- Durable SQLite ledger in WAL/FULL mode for candidates, risk reports, intents, executions, positions, and control state. High-volume operational events are retained for 24 hours and capped at 50,000 rows by default.
+- Durable SQLite ledger in WAL/FULL mode for candidates, risk reports, intents, executions, positions, 30-second portfolio marks, and control state. High-volume operational events are retained for 24 hours and capped at 50,000 rows by default.
 - Exit state machine: sell half at `+40%`, trail the remainder by `20%`, close at 12 minutes, and allow emergency exits even while new buys are disarmed.
 
 ## Quick start
@@ -51,6 +51,20 @@ npm start
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). The default mode is `shadow` and cannot send transactions.
 
 Use authenticated private Solana HTTP/WebSocket endpoints for continuous operation. The public endpoints are only safe defaults for setup and will rate-limit or stall.
+
+### Portfolio dashboard
+
+The dashboard has separate shadow, manual, and live books. For each mode it shows current and closed positions, capital deployed, fees, realized P&L, unrealized P&L, daily/session/total P&L, return, and a rolling performance graph. In the running manual or live mode it also marks the configured wallet's SOL balance and combines it with estimated open-position value for net worth.
+
+Accounting deliberately distinguishes facts from estimates:
+
+- confirmed live/manual fills use the wallet's native SOL balance delta, token balance delta, transaction fee, signature, and the observed SOL/USD mark;
+- shadow fills use the deterministic requested spend and the bonding-curve market-cap move;
+- open token value and unrealized P&L are estimates from the latest bonding-curve market cap, not a guaranteed executable quote;
+- portfolio marks are stored every 30 seconds and retained with the operational retention window;
+- positions created before this accounting schema have no reconstructable cost basis. They are labeled legacy, excluded from P&L and net-worth position value, and never silently backfilled with invented numbers.
+
+The dashboard is an operational view, not independent proof of custody or profit. Reconcile live signatures and balances against Solana RPC before relying on a result.
 
 ## Configure a private Solana RPC
 

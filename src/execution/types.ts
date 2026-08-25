@@ -18,6 +18,7 @@ export interface TransactionBuilder {
 export interface ExecutionContext {
   mintState: MintState;
   riskReport: RiskReport;
+  solUsd?: number;
 }
 
 export interface Executor {

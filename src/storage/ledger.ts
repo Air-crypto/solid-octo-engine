@@ -7,6 +7,7 @@ import type {
   ExecutionResult,
   MintState,
   OrderIntent,
+  PortfolioMark,
   Position,
   RiskReport,
 } from "../domain/types.js";
@@ -252,6 +253,34 @@ export class Ledger {
     return rows.map((row) => JSON.parse(row.position_json) as Position);
   }
 
+  savePortfolioMark(mark: PortfolioMark): void {
+    this.db
+      .prepare(
+        `INSERT INTO portfolio_marks(mode, wallet, at_ms, mark_json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(mode, wallet, at_ms)
+         DO UPDATE SET mark_json=excluded.mark_json`,
+      )
+      .run(mark.mode, mark.wallet, mark.atMs, JSON.stringify(mark));
+  }
+
+  listPortfolioMarks(
+    mode: DeskMode,
+    wallet: string,
+    limit = 240,
+  ): PortfolioMark[] {
+    const rows = this.db
+      .prepare(
+        `SELECT mark_json FROM portfolio_marks
+         WHERE mode = ? AND wallet = ?
+         ORDER BY at_ms DESC LIMIT ?`,
+      )
+      .all(mode, wallet, limit) as Array<{ mark_json: string }>;
+    return rows
+      .reverse()
+      .map((row) => JSON.parse(row.mark_json) as PortfolioMark);
+  }
+
   dailySpendUsdCents(sinceMs: number, mode: DeskMode, wallet: string): number {
     const rows = this.db
       .prepare(
@@ -307,6 +336,9 @@ export class Ledger {
           `DELETE FROM mints
            WHERE updated_at_ms < ? AND phase IN ('seen', 'killed', 'closed')`,
         )
+        .run(cutoffMs);
+      this.db
+        .prepare("DELETE FROM portfolio_marks WHERE at_ms < ?")
         .run(cutoffMs);
       this.db
         .prepare(
@@ -377,6 +409,15 @@ export class Ledger {
         position_json TEXT NOT NULL,
         updated_at_ms INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS portfolio_marks(
+        mode TEXT NOT NULL,
+        wallet TEXT NOT NULL,
+        at_ms INTEGER NOT NULL,
+        mark_json TEXT NOT NULL,
+        PRIMARY KEY(mode, wallet, at_ms)
+      );
+      CREATE INDEX IF NOT EXISTS portfolio_marks_time_idx ON portfolio_marks(at_ms);
 
       CREATE TABLE IF NOT EXISTS control_state(
         key TEXT PRIMARY KEY,

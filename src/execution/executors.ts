@@ -15,7 +15,11 @@ import type {
   Executor,
   TransactionBuilder,
 } from "./types.js";
-import { tokenDeltaFromTransaction } from "./token-balance.js";
+import {
+  feeLamportsFromTransaction,
+  nativeSolDeltaFromTransaction,
+  tokenDeltaFromTransaction,
+} from "./token-balance.js";
 import {
   validateBuiltTransaction,
   validateConfirmedSignature,
@@ -78,6 +82,7 @@ export class ShadowExecutor extends BaseExecutor {
         expectedTokenAmountBaseUnits ?? approximateOut(intent, context),
       intentId: intent.id,
       mode: "shadow",
+      observedSolUsd: context.solUsd,
       status: "paper_filled",
     };
   }
@@ -203,11 +208,17 @@ export class LocalKeypairExecutor extends BaseExecutor {
       wallet: this.wallet,
     }).toString();
     return {
+      actualSolDeltaLamports: nativeSolDeltaFromTransaction({
+        transaction: confirmedTransaction,
+        wallet: this.wallet,
+      }).toString(),
       actualTokenAmountBaseUnits,
       confirmedAtMs: Date.now(),
       expectedTokenAmountBaseUnits: built.expectedOutAmountBaseUnits,
+      feeLamports: feeLamportsFromTransaction(confirmedTransaction).toString(),
       intentId: intent.id,
       mode: "live",
+      observedSolUsd: context.solUsd,
       signature,
       status: "confirmed",
     };

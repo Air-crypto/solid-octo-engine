@@ -9,6 +9,8 @@ import {
 } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
 import {
+  feeLamportsFromTransaction,
+  nativeSolDeltaFromTransaction,
   tokenBalanceDelta,
   tokenDeltaFromTransaction,
 } from "../src/execution/token-balance.js";
@@ -114,8 +116,11 @@ describe("token balance reconciliation", () => {
   });
 
   it("reconciles only the configured owner and mint from transaction metadata", () => {
+    const wallet = Keypair.generate().publicKey;
     const transaction = {
       meta: {
+        fee: 5_000,
+        postBalances: [900_000, 2],
         postTokenBalances: [
           { mint: "mint", owner: "wallet", uiTokenAmount: { amount: "125" } },
           { mint: "other", owner: "wallet", uiTokenAmount: { amount: "999" } },
@@ -123,6 +128,19 @@ describe("token balance reconciliation", () => {
         preTokenBalances: [
           { mint: "mint", owner: "wallet", uiTokenAmount: { amount: "25" } },
         ],
+        preBalances: [1_000_000, 2],
+      },
+      transaction: {
+        message: {
+          accountKeys: [
+            { pubkey: wallet, signer: true, writable: true },
+            {
+              pubkey: Keypair.generate().publicKey,
+              signer: false,
+              writable: false,
+            },
+          ],
+        },
       },
     } as unknown as ParsedTransactionWithMeta;
     expect(
@@ -133,5 +151,12 @@ describe("token balance reconciliation", () => {
         wallet: "wallet",
       }),
     ).toBe(100n);
+    expect(
+      nativeSolDeltaFromTransaction({
+        transaction,
+        wallet: wallet.toBase58(),
+      }),
+    ).toBe(-100_000n);
+    expect(feeLamportsFromTransaction(transaction)).toBe(5_000n);
   });
 });

@@ -67,6 +67,7 @@ Risk inputs and bounded raw evidence are hashed into the order intent. `unknown`
 - A live transaction is simulated with signature verification before broadcast.
 - Manual mode does not mark a fill from the popup response alone; it validates the fetched confirmed transaction.
 - Dashboard state comes from the ledger, not Bot messages.
+- Portfolio accounting records confirmed native/token deltas and fees when available, estimates open value from the bonding-curve market cap, and writes mode- and wallet-scoped 30-second marks. Pre-schema positions remain explicitly unvalued instead of receiving fabricated P&L.
 
 ## Exit state
 

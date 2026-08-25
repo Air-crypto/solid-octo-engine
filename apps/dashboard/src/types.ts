@@ -38,13 +38,74 @@ export interface Position {
   status: string;
 }
 
+export type DeskMode = "shadow" | "manual" | "live";
+
+export interface PortfolioPosition {
+  closedAtMs: number | null;
+  costBasisUsd: number | null;
+  currentMarketCapUsd: number | null;
+  currentValueUsd: number | null;
+  entryMarketCapUsd: number;
+  entryTimeMs: number;
+  entryValueUsd: number | null;
+  feesUsd: number | null;
+  id: string;
+  legacy: boolean;
+  mint: string;
+  mode: DeskMode;
+  realizedPnlUsd: number | null;
+  returnPct: number | null;
+  slippageBps: number | null;
+  status: string;
+  unrealizedPnlUsd: number | null;
+  wallet: string;
+}
+
+export interface PortfolioSummary {
+  capitalDeployedUsd: number;
+  closedPositions: number;
+  dailyPnlUsd: number;
+  feesUsd: number;
+  legacyPositions: number;
+  mode: DeskMode;
+  netWorthUsd: number | null;
+  openPositionValueUsd: number;
+  openPositions: number;
+  realizedPnlUsd: number;
+  sessionPnlUsd: number;
+  totalPnlUsd: number;
+  totalReturnPct: number | null;
+  unrealizedPnlUsd: number;
+  wallet: string;
+  walletSol: number | null;
+  walletValueUsd: number | null;
+}
+
+export interface PortfolioMark {
+  atMs: number;
+  mode: DeskMode;
+  netWorthUsd: number | null;
+  realizedPnlUsd: number;
+  totalPnlUsd: number;
+  unrealizedPnlUsd: number;
+  wallet: string;
+}
+
 export interface Snapshot {
   armedUntilMs: number | null;
   candidates: MintState[];
   events: DeskEvent[];
   health: Record<string, { detail: string; status: string }>;
   killSwitch: boolean;
-  mode: "shadow" | "manual" | "live";
+  mode: DeskMode;
+  portfolio: {
+    generatedAtMs: number;
+    history: Record<DeskMode, PortfolioMark[]>;
+    positions: PortfolioPosition[];
+    solUsd: number | null;
+    solUsdObservedAtMs: number | null;
+    summaries: Record<DeskMode, PortfolioSummary>;
+  };
   positions: Position[];
   readiness: { canArm: boolean; reasons: string[] };
   rpc: {

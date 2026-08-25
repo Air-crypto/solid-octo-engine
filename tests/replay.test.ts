@@ -60,6 +60,9 @@ describe("VSEXY replay", () => {
     const snapshot = engine.snapshot();
     expect(snapshot.positions).toHaveLength(1);
     expect(snapshot.positions[0]?.mint).toBe(fixture.events[0]?.mint);
+    expect(snapshot.positions[0]?.entryValueUsd).toBe(10);
+    expect(snapshot.portfolio.summaries.shadow.openPositions).toBe(1);
+    expect(snapshot.portfolio.positions[0]?.legacy).toBe(false);
     expect(
       snapshot.events.filter((event) => event.type === "intent.created"),
     ).toHaveLength(1);
@@ -67,6 +70,8 @@ describe("VSEXY replay", () => {
     const killed = engine.snapshot();
     expect(killed.killSwitch).toBe(true);
     expect(killed.positions[0]?.status).toBe("closed");
+    expect(killed.positions[0]?.exitFills).toHaveLength(1);
+    expect(killed.portfolio.summaries.shadow.realizedPnlUsd).not.toBeNaN();
     expect(killed.events.some((event) => event.type === "exit.triggered")).toBe(
       true,
     );
@@ -237,6 +242,8 @@ describe("live readiness", () => {
     const snapshot = engine.snapshot();
     expect(snapshot.positions).toHaveLength(0);
     expect(snapshot.candidates[0]?.phase).toBe("killed");
+    expect(snapshot.portfolio.summaries.live.walletSol).toBe(0.1);
+    expect(snapshot.portfolio.summaries.live.netWorthUsd).toBe(15);
     expect(snapshot.readiness).toEqual({ canArm: true, reasons: [] });
     expect(engine.arm(armToken, 60_000)).toBeGreaterThan(Date.now());
     await engine.stop();

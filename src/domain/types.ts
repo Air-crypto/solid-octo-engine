@@ -158,11 +158,14 @@ export interface OrderIntent {
 }
 
 export interface ExecutionResult {
+  actualSolDeltaLamports?: string;
   actualTokenAmountBaseUnits?: string;
   confirmedAtMs?: number;
   expectedTokenAmountBaseUnits?: string;
+  feeLamports?: string;
   intentId: string;
   mode: DeskMode;
+  observedSolUsd?: number;
   signature?: string;
   status:
     | "paper_filled"
@@ -173,18 +176,100 @@ export interface ExecutionResult {
   transactionBase64?: string;
 }
 
+export interface PositionExitFill {
+  atMs: number;
+  costBasisUsd: number;
+  feeUsd: number | null;
+  marketCapUsd: number;
+  proceedsUsd: number;
+  realizedPnlUsd: number;
+  reason: string;
+  signature?: string;
+  slippageBps: number | null;
+  tokenAmountBaseUnits: string;
+}
+
 export interface Position {
+  closedAtMs?: number;
+  entryFeeUsd?: number | null;
   entryMarketCapUsd: number;
   entrySolLamports: string;
+  entrySlippageBps?: number | null;
   entryTimeMs: number;
+  entryValueUsd?: number;
+  exitFills?: PositionExitFill[];
+  feesUsd?: number;
   highWaterMarketCapUsd: number;
   id: string;
+  lastMarketCapUsd?: number;
   mint: string;
   mode: DeskMode;
+  realizedPnlUsd?: number;
+  realizedProceedsUsd?: number;
   remainingTokenBaseUnits: string;
   status: "open" | "closing" | "closed";
   tokenAmountBaseUnits: string;
   wallet: string;
+}
+
+export interface PortfolioPosition {
+  closedAtMs: number | null;
+  costBasisUsd: number | null;
+  currentMarketCapUsd: number | null;
+  currentValueUsd: number | null;
+  entryMarketCapUsd: number;
+  entryTimeMs: number;
+  entryValueUsd: number | null;
+  feesUsd: number | null;
+  id: string;
+  legacy: boolean;
+  mint: string;
+  mode: DeskMode;
+  realizedPnlUsd: number | null;
+  returnPct: number | null;
+  slippageBps: number | null;
+  status: Position["status"];
+  unrealizedPnlUsd: number | null;
+  wallet: string;
+}
+
+export interface PortfolioModeSummary {
+  capitalDeployedUsd: number;
+  closedPositions: number;
+  dailyPnlUsd: number;
+  feesUsd: number;
+  legacyPositions: number;
+  mode: DeskMode;
+  netWorthUsd: number | null;
+  openPositionValueUsd: number;
+  openPositions: number;
+  realizedPnlUsd: number;
+  sessionPnlUsd: number;
+  totalPnlUsd: number;
+  totalReturnPct: number | null;
+  unrealizedPnlUsd: number;
+  wallet: string;
+  walletSol: number | null;
+  walletValueUsd: number | null;
+}
+
+export interface PortfolioMark {
+  atMs: number;
+  mode: DeskMode;
+  netWorthUsd: number | null;
+  realizedPnlUsd: number;
+  totalPnlUsd: number;
+  unrealizedPnlUsd: number;
+  wallet: string;
+}
+
+export interface PortfolioSnapshot {
+  generatedAtMs: number;
+  history: Record<DeskMode, PortfolioMark[]>;
+  positions: PortfolioPosition[];
+  solUsd: number | null;
+  solUsdObservedAtMs: number | null;
+  summaries: Record<DeskMode, PortfolioModeSummary>;
 }
 
 export type ExitReason =
@@ -220,6 +305,7 @@ export interface DeskSnapshot {
   health: Record<string, ComponentHealth>;
   killSwitch: boolean;
   mode: DeskMode;
+  portfolio: PortfolioSnapshot;
   positions: Position[];
   readiness: ReadinessSnapshot;
   rpc: {

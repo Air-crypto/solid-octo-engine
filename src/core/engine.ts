@@ -7,6 +7,7 @@ import type {
   OrderIntent,
   PolicyConfig,
   Position,
+  PriceMark,
   PumpEvent,
   RiskReport,
 } from "../domain/types.js";
@@ -14,7 +15,7 @@ import type { RpcRateController } from "../rpc/rate-controller.js";
 import type { PriceOracle } from "../adapters/price-oracle.js";
 import type { PumpEventSource } from "../adapters/pump-events.js";
 import type { RiskProvider } from "../risk/types.js";
-import type { Executor, ExecutionContext } from "../execution/types.js";
+import type { Executor } from "../execution/types.js";
 import type { Ledger } from "../storage/ledger.js";
 import { CandidateStore } from "./candidate-store.js";
 import type { ControlPlane } from "./control.js";
@@ -24,8 +25,13 @@ import { newId, stableHash } from "./hash.js";
 import { HealthRegistry } from "./health.js";
 import { usdCentsToLamports } from "./market-cap.js";
 import { evaluateEntryPolicy } from "./policy.js";
-import { tokenDeltaFromTransaction } from "../execution/token-balance.js";
+import {
+  feeLamportsFromTransaction,
+  nativeSolDeltaFromTransaction,
+  tokenDeltaFromTransaction,
+} from "../execution/token-balance.js";
 import { validateConfirmedSignature } from "../execution/transaction-guard.js";
+import { buildPortfolio } from "./portfolio.js";
 
 export class MintDeskEngine {
   readonly bus: DeskEventBus;
@@ -35,10 +41,14 @@ export class MintDeskEngine {
   private readonly eventChains = new Map<string, Promise<void>>();
   private consecutiveRiskFailures = 0;
   private lastPassingRiskAtMs: number | null = null;
+  private lastPortfolioMarkAtMs = 0;
+  private latestSolMark: PriceMark | null = null;
   private rpcHealthTimer: NodeJS.Timeout | null = null;
   private monitorTimer: NodeJS.Timeout | null = null;
   private riskBusy = false;
+  private readonly sessionStartedAtMs = Date.now();
   private started = false;
+  private walletBalanceLamports: bigint | null = null;
 
   constructor(
     readonly mode: DeskMode,
@@ -120,6 +130,7 @@ export class MintDeskEngine {
     let mark;
     try {
       mark = await this.prices.getMark(event.observedAtMs);
+      this.latestSolMark = mark;
       this.health.heartbeat(
         "priceOracle",
         `${mark.sources.length} sources, spread ${mark.spreadPct.toFixed(3)}%`,
@@ -136,7 +147,10 @@ export class MintDeskEngine {
     }
 
     const state = this.candidates.apply(event, mark);
-    if (!state) return;
+    if (!state) {
+      this.maybeRecordPortfolioMark(event.observedAtMs);
+      return;
+    }
     if (event.kind === "create")
       this.bus.emit(
         "scout",
@@ -145,6 +159,7 @@ export class MintDeskEngine {
         event.observedAtMs,
       );
     await this.evaluateOpenPosition(state, event.observedAtMs);
+    this.maybeRecordPortfolioMark(event.observedAtMs);
 
     if (
       state.phase !== "seen" ||
@@ -300,6 +315,16 @@ export class MintDeskEngine {
     });
     const state = this.candidates.get(intent.mint);
     if (!state) throw new Error("candidate state is missing");
+    let solUsd = this.latestSolMark?.priceUsd;
+    if (solUsd == null) {
+      try {
+        const mark = await this.prices.getMark();
+        this.latestSolMark = mark;
+        solUsd = mark.priceUsd;
+      } catch {
+        // Confirmation remains authoritative even when the display mark is unavailable.
+      }
+    }
     const actualTokenAmountBaseUnits = tokenDeltaFromTransaction({
       mint: intent.mint,
       side: intent.side,
@@ -321,24 +346,36 @@ export class MintDeskEngine {
       throw new Error("manual sell has no matching open position");
     const confirmed: ExecutionResult = {
       ...execution,
+      actualSolDeltaLamports: nativeSolDeltaFromTransaction({
+        transaction: confirmedTransaction,
+        wallet: intent.wallet,
+      }).toString(),
       actualTokenAmountBaseUnits,
       confirmedAtMs: Date.now(),
+      feeLamports: feeLamportsFromTransaction(confirmedTransaction).toString(),
+      observedSolUsd: solUsd,
       signature,
       status: "confirmed",
     };
     this.ledger.saveExecution(confirmed);
     this.ledger.updateIntentStatus(intent.id, "confirmed");
-    if (intent.side === "buy")
-      return this.openPosition(intent, confirmed, state);
+    this.applyWalletDelta(confirmed);
+    const confirmedAtMs = confirmed.confirmedAtMs!;
+    if (intent.side === "buy") {
+      const opened = this.openPosition(intent, confirmed, state);
+      this.maybeRecordPortfolioMark(confirmedAtMs, true);
+      return opened;
+    }
 
     const position = sellPosition!;
-    const remaining = BigInt(position.remainingTokenBaseUnits);
-    const sold = BigInt(actualTokenAmountBaseUnits);
-    position.remainingTokenBaseUnits = (
-      sold >= remaining ? 0n : remaining - sold
-    ).toString();
-    position.status =
-      BigInt(position.remainingTokenBaseUnits) === 0n ? "closed" : "open";
+    this.applyExitFill(
+      position,
+      confirmed,
+      state,
+      BigInt(actualTokenAmountBaseUnits),
+      "manual_confirmation",
+      confirmedAtMs,
+    );
     this.ledger.upsertPosition(position);
     this.candidates.setPhase(
       state.mint,
@@ -349,11 +386,24 @@ export class MintDeskEngine {
       position.status === "closed" ? "position.closed" : "position.scaled",
       { position, reason: "manual_confirmation" },
     );
+    this.maybeRecordPortfolioMark(confirmedAtMs, true);
     return position;
   }
 
   snapshot(): DeskSnapshot {
     const control = this.control.snapshot();
+    const generatedAtMs = Date.now();
+    const rawPositions = this.ledger.listPositions(false);
+    const portfolio = buildPortfolio({
+      activeMode: this.mode,
+      nowMs: generatedAtMs,
+      positions: rawPositions,
+      sessionStartedAtMs: this.sessionStartedAtMs,
+      solMark: this.latestSolMark,
+      stateForMint: (mint) => this.candidates.get(mint),
+      wallet: this.executor.wallet,
+      walletBalanceLamports: this.walletBalanceLamports,
+    });
     return {
       armedUntilMs: control.armedUntilMs,
       candidates: this.candidates.list(100),
@@ -361,7 +411,25 @@ export class MintDeskEngine {
       health: this.health.snapshot(),
       killSwitch: control.killSwitch,
       mode: this.mode,
-      positions: this.ledger.listPositions(false),
+      portfolio: {
+        generatedAtMs,
+        history: {
+          live: this.ledger.listPortfolioMarks("live", this.executor.wallet),
+          manual: this.ledger.listPortfolioMarks(
+            "manual",
+            this.executor.wallet,
+          ),
+          shadow: this.ledger.listPortfolioMarks(
+            "shadow",
+            this.executor.wallet,
+          ),
+        },
+        positions: portfolio.positions,
+        solUsd: this.latestSolMark?.priceUsd ?? null,
+        solUsdObservedAtMs: this.latestSolMark?.observedAtMs ?? null,
+        summaries: portfolio.summaries,
+      },
+      positions: rawPositions,
       readiness: this.readiness(),
       rpc: this.rpc.snapshot(),
     };
@@ -445,6 +513,7 @@ export class MintDeskEngine {
       const result = await this.executor.execute(intent, {
         mintState: state,
         riskReport: report,
+        solUsd,
       });
       this.ledger.saveExecution(result);
       this.ledger.updateIntentStatus(intent.id, result.status);
@@ -455,7 +524,9 @@ export class MintDeskEngine {
       );
       if (result.status === "paper_filled" || result.status === "confirmed") {
         this.health.heartbeat("execution", result.status);
+        this.applyWalletDelta(result);
         this.openPosition(intent, result, state);
+        this.maybeRecordPortfolioMark(result.confirmedAtMs ?? nowMs, true);
       } else if (result.status === "awaiting_manual_signature") {
         this.health.set("execution", "degraded", "awaiting Phantom signature");
       }
@@ -483,13 +554,21 @@ export class MintDeskEngine {
     if (!tokenAmount || BigInt(tokenAmount) <= 0n)
       throw new Error("execution did not return a token amount");
     const position: Position = {
+      entryFeeUsd: executionFeeUsd(result),
       entryMarketCapUsd: state.currentMarketCapUsd,
       entrySolLamports: intent.maxLamports,
+      entrySlippageBps: buySlippageBps(result),
       entryTimeMs: result.confirmedAtMs ?? Date.now(),
+      entryValueUsd: buyValueUsd(intent, result),
+      exitFills: [],
+      feesUsd: executionFeeUsd(result) ?? 0,
       highWaterMarketCapUsd: state.currentMarketCapUsd,
       id: newId("pos"),
       mint: state.mint,
       mode: this.mode,
+      lastMarketCapUsd: state.currentMarketCapUsd,
+      realizedPnlUsd: 0,
+      realizedProceedsUsd: 0,
       remainingTokenBaseUnits: tokenAmount,
       status: "open",
       tokenAmountBaseUnits: tokenAmount,
@@ -519,6 +598,7 @@ export class MintDeskEngine {
       position.highWaterMarketCapUsd,
       state.currentMarketCapUsd,
     );
+    position.lastMarketCapUsd = state.currentMarketCapUsd;
     const decision = this.control.snapshot(nowMs).killSwitch
       ? { fraction: 1, reason: "kill_switch" as const, triggered: true }
       : evaluateExit(position, state.currentMarketCapUsd, this.policy, nowMs);
@@ -558,6 +638,7 @@ export class MintDeskEngine {
       const result = await this.executor.execute(intent, {
         mintState: state,
         riskReport: exitRisk,
+        solUsd: this.latestSolMark?.priceUsd,
       });
       this.ledger.saveExecution(result);
       this.ledger.updateIntentStatus(intent.id, result.status);
@@ -565,22 +646,24 @@ export class MintDeskEngine {
         const filled = result.actualTokenAmountBaseUnits
           ? BigInt(result.actualTokenAmountBaseUnits)
           : amount;
-        const remaining = BigInt(position.remainingTokenBaseUnits);
-        position.remainingTokenBaseUnits = (
-          filled >= remaining ? 0n : remaining - filled
-        ).toString();
-        position.status =
-          BigInt(position.remainingTokenBaseUnits) === 0n ? "closed" : "open";
-        this.ledger.upsertPosition(position);
-        this.candidates.setPhase(
-          state.mint,
-          position.status === "closed" ? "closed" : "confirmed",
+        this.applyWalletDelta(result);
+        this.applyExitFill(
+          position,
+          result,
+          state,
+          filled,
+          decision.reason,
+          result.confirmedAtMs ?? nowMs,
         );
+        this.ledger.upsertPosition(position);
+        const closed = BigInt(position.remainingTokenBaseUnits) === 0n;
+        this.candidates.setPhase(state.mint, closed ? "closed" : "confirmed");
         this.bus.emit(
           "finance",
-          position.status === "closed" ? "position.closed" : "position.scaled",
+          closed ? "position.closed" : "position.scaled",
           { decision, position },
         );
+        this.maybeRecordPortfolioMark(result.confirmedAtMs ?? nowMs, true);
       } else if (
         result.status !== "awaiting_manual_signature" &&
         result.status !== "submitted"
@@ -650,6 +733,7 @@ export class MintDeskEngine {
         this.riskBusy = false;
       }
     }
+    this.maybeRecordPortfolioMark(Date.now());
   }
 
   private async preflightInfrastructure(): Promise<void> {
@@ -676,10 +760,14 @@ export class MintDeskEngine {
       return;
     }
     try {
-      const balance = await this.connection.getBalance(
-        new PublicKey(this.executor.wallet),
-        "processed",
-      );
+      const balance =
+        this.walletBalanceLamports == null
+          ? await this.connection.getBalance(
+              new PublicKey(this.executor.wallet),
+              "processed",
+            )
+          : Number(this.walletBalanceLamports);
+      this.walletBalanceLamports = BigInt(balance);
       if (balance < 5_000_000)
         throw new Error("execution wallet has less than 0.005 SOL");
       this.health.heartbeat(
@@ -694,10 +782,103 @@ export class MintDeskEngine {
   private async refreshRpcHealth(): Promise<void> {
     try {
       const slot = await this.connection.getSlot("processed");
+      if (this.mode !== "shadow") {
+        const balance = await this.connection.getBalance(
+          new PublicKey(this.executor.wallet),
+          "processed",
+        );
+        this.walletBalanceLamports = BigInt(balance);
+      }
       this.health.heartbeat("rpc", `processed slot ${slot}`);
     } catch (error) {
       this.health.set("rpc", "degraded", errorMessage(error));
     }
+  }
+
+  private applyWalletDelta(result: ExecutionResult): void {
+    if (
+      this.mode === "shadow" ||
+      this.walletBalanceLamports == null ||
+      result.actualSolDeltaLamports == null
+    )
+      return;
+    this.walletBalanceLamports += BigInt(result.actualSolDeltaLamports);
+  }
+
+  private applyExitFill(
+    position: Position,
+    result: ExecutionResult,
+    state: MintState,
+    requestedFilled: bigint,
+    reason: string,
+    atMs: number,
+  ): void {
+    const remainingBefore = BigInt(position.remainingTokenBaseUnits);
+    const filled =
+      requestedFilled > remainingBefore ? remainingBefore : requestedFilled;
+    const original = BigInt(position.tokenAmountBaseUnits);
+    const soldFraction = bigintRatio(filled, original);
+    const entryValueUsd = position.entryValueUsd;
+    const costBasisUsd =
+      entryValueUsd == null ? null : entryValueUsd * soldFraction;
+    const proceedsUsd = sellProceedsUsd(position, result, state, soldFraction);
+    const feeUsd = executionFeeUsd(result);
+    if (costBasisUsd != null && proceedsUsd != null) {
+      const realizedPnlUsd = proceedsUsd - costBasisUsd;
+      position.exitFills = [
+        ...(position.exitFills ?? []),
+        {
+          atMs,
+          costBasisUsd,
+          feeUsd,
+          marketCapUsd: state.currentMarketCapUsd,
+          proceedsUsd,
+          realizedPnlUsd,
+          reason,
+          signature: result.signature,
+          slippageBps: sellSlippageBps(result),
+          tokenAmountBaseUnits: filled.toString(),
+        },
+      ];
+      position.realizedPnlUsd = (position.realizedPnlUsd ?? 0) + realizedPnlUsd;
+      position.realizedProceedsUsd =
+        (position.realizedProceedsUsd ?? 0) + proceedsUsd;
+    }
+    position.feesUsd = (position.feesUsd ?? 0) + (feeUsd ?? 0);
+    position.lastMarketCapUsd = state.currentMarketCapUsd;
+    position.remainingTokenBaseUnits = (remainingBefore - filled).toString();
+    position.status =
+      BigInt(position.remainingTokenBaseUnits) === 0n ? "closed" : "open";
+    if (position.status === "closed") position.closedAtMs = atMs;
+  }
+
+  private maybeRecordPortfolioMark(nowMs: number, force = false): void {
+    if (!this.latestSolMark) return;
+    const bucketMs = Math.floor(nowMs / 30_000) * 30_000;
+    if (!force && bucketMs <= this.lastPortfolioMarkAtMs) return;
+    const portfolio = buildPortfolio({
+      activeMode: this.mode,
+      nowMs,
+      positions: this.ledger.listPositions(false),
+      sessionStartedAtMs: this.sessionStartedAtMs,
+      solMark: this.latestSolMark,
+      stateForMint: (mint) => this.candidates.get(mint),
+      wallet: this.executor.wallet,
+      walletBalanceLamports: this.walletBalanceLamports,
+    });
+    for (const mode of ["shadow", "manual", "live"] as const) {
+      const summary = portfolio.summaries[mode];
+      this.ledger.savePortfolioMark({
+        atMs: bucketMs,
+        mode,
+        netWorthUsd: summary.netWorthUsd,
+        realizedPnlUsd: summary.realizedPnlUsd,
+        totalPnlUsd: summary.totalPnlUsd,
+        unrealizedPnlUsd: summary.unrealizedPnlUsd,
+        wallet: this.executor.wallet,
+      });
+    }
+    this.lastPortfolioMarkAtMs = Math.max(this.lastPortfolioMarkAtMs, bucketMs);
   }
 
   private handleBackgroundFailure(source: string, error: unknown): void {
@@ -786,6 +967,80 @@ function redactIntent(intent: OrderIntent): object {
 function withoutTransaction(result: ExecutionResult): object {
   const { transactionBase64: _removed, ...safe } = result;
   return safe;
+}
+
+function buyValueUsd(
+  intent: OrderIntent,
+  result: ExecutionResult,
+): number | undefined {
+  const nativeValue = solDeltaUsd(result);
+  if (nativeValue != null && nativeValue < 0) return Math.abs(nativeValue);
+  return intent.spendUsdCents == null ? undefined : intent.spendUsdCents / 100;
+}
+
+function sellProceedsUsd(
+  position: Position,
+  result: ExecutionResult,
+  state: MintState,
+  soldFraction: number,
+): number | null {
+  const nativeValue = solDeltaUsd(result);
+  if (nativeValue != null && nativeValue > 0) return nativeValue;
+  if (result.mode !== "shadow" || position.entryValueUsd == null) return null;
+  return (
+    position.entryValueUsd *
+    soldFraction *
+    (state.currentMarketCapUsd / position.entryMarketCapUsd)
+  );
+}
+
+function executionFeeUsd(result: ExecutionResult): number | null {
+  if (result.feeLamports == null || result.observedSolUsd == null) return null;
+  return (
+    (Number(BigInt(result.feeLamports)) / 1_000_000_000) * result.observedSolUsd
+  );
+}
+
+function solDeltaUsd(result: ExecutionResult): number | null {
+  if (result.actualSolDeltaLamports == null || result.observedSolUsd == null)
+    return null;
+  return (
+    (Number(BigInt(result.actualSolDeltaLamports)) / 1_000_000_000) *
+    result.observedSolUsd
+  );
+}
+
+function buySlippageBps(result: ExecutionResult): number | null {
+  if (
+    result.expectedTokenAmountBaseUnits == null ||
+    result.actualTokenAmountBaseUnits == null
+  )
+    return null;
+  return shortfallBps(
+    BigInt(result.expectedTokenAmountBaseUnits),
+    BigInt(result.actualTokenAmountBaseUnits),
+  );
+}
+
+function sellSlippageBps(result: ExecutionResult): number | null {
+  if (
+    result.expectedTokenAmountBaseUnits == null ||
+    result.actualSolDeltaLamports == null
+  )
+    return null;
+  const actual = BigInt(result.actualSolDeltaLamports);
+  if (actual <= 0n) return null;
+  return shortfallBps(BigInt(result.expectedTokenAmountBaseUnits), actual);
+}
+
+function shortfallBps(expected: bigint, actual: bigint): number | null {
+  if (expected <= 0n || actual < 0n) return null;
+  return Number(((expected - actual) * 10_000_000n) / expected) / 1_000;
+}
+
+function bigintRatio(numerator: bigint, denominator: bigint): number {
+  if (denominator <= 0n || numerator <= 0n) return 0;
+  return Number((numerator * 1_000_000_000n) / denominator) / 1_000_000_000;
 }
 
 function errorMessage(error: unknown): string {

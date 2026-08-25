@@ -20,7 +20,7 @@ Copy `.env.example` to a service-owned environment file. Keep `DESK_MODE=shadow`
 Start the service and inspect:
 
 - `/api/health` — event stream, price, risk, execution, control state;
-- `/api/snapshot` — candidates, positions, and audit events;
+- `/api/snapshot` — candidates, positions, mode-scoped portfolio summaries and history, and audit events;
 - the dashboard at `http://127.0.0.1:8787`;
 - SQLite and logs after sleep/wake, WebSocket interruption, rate limiting, and restart.
 
