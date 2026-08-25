@@ -1,0 +1,11 @@
+.env
+.git
+.github
+data
+dist
+node_modules
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*keypair*.json
+work

@@ -1,0 +1,25 @@
+[Unit]
+Description=Solid Octo deterministic mint desk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solid-octo
+Group=solid-octo
+WorkingDirectory=/opt/solid-octo-engine
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/solid-octo-engine.env
+ExecStart=/usr/bin/node /opt/solid-octo-engine/dist/index.js
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/solid-octo-engine
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

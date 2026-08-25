@@ -1,0 +1,44 @@
+{
+  "solUsd": 150,
+  "riskByMint": {
+    "VSEXY11111111111111111111111111111111111111": true
+  },
+  "events": [
+    {
+      "kind": "create",
+      "mint": "VSEXY11111111111111111111111111111111111111",
+      "signature": "vsexy-create-signature",
+      "slot": 100,
+      "observedAtMs": 1000000,
+      "blockTimeMs": 987000,
+      "bondingCurve": "VsexYCurve111111111111111111111111111111111",
+      "creator": "VsexYCreator1111111111111111111111111111111",
+      "isCashbackEnabled": false,
+      "isMayhemMode": false,
+      "name": "VSEXY",
+      "quoteMint": "So11111111111111111111111111111111111111112",
+      "symbol": "VSEXY",
+      "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "tokenTotalSupplyBaseUnits": "1000000000000000",
+      "uri": "https://example.invalid/vsexy.json",
+      "virtualSolReservesLamports": "21460000000",
+      "virtualTokenReservesBaseUnits": "1073000000000000"
+    },
+    {
+      "kind": "trade",
+      "mint": "VSEXY11111111111111111111111111111111111111",
+      "signature": "vsexy-buy-signature",
+      "slot": 101,
+      "observedAtMs": 1000500,
+      "blockTimeMs": 987500,
+      "creator": "VsexYCreator1111111111111111111111111111111",
+      "isBuy": true,
+      "quoteAmountBaseUnits": "1717200000",
+      "solAmountLamports": "1717200000",
+      "tokenAmountBaseUnits": "70000000000000",
+      "trader": "VsexYBuyer111111111111111111111111111111111",
+      "virtualSolReservesLamports": "23177200000",
+      "virtualTokenReservesBaseUnits": "1073000000000000"
+    }
+  ]
+}

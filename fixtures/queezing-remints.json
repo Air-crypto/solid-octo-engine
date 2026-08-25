@@ -1,0 +1,49 @@
+{
+  "solUsd": 150,
+  "riskByMint": {
+    "QueeZingMintOne11111111111111111111111111111": false,
+    "QueeZingMintTwo22222222222222222222222222222": false
+  },
+  "events": [
+    {
+      "kind": "create",
+      "mint": "QueeZingMintOne11111111111111111111111111111",
+      "signature": "queezing-create-one",
+      "slot": 200,
+      "observedAtMs": 2000000,
+      "blockTimeMs": 1999000,
+      "bondingCurve": "QueeZingCurveOne111111111111111111111111111",
+      "creator": "QueeZingCreator11111111111111111111111111111",
+      "isCashbackEnabled": false,
+      "isMayhemMode": false,
+      "name": "QUEEZING",
+      "quoteMint": "So11111111111111111111111111111111111111112",
+      "symbol": "QUEEZING",
+      "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "tokenTotalSupplyBaseUnits": "1000000000000000",
+      "uri": "https://example.invalid/q1.json",
+      "virtualSolReservesLamports": "23177200000",
+      "virtualTokenReservesBaseUnits": "1073000000000000"
+    },
+    {
+      "kind": "create",
+      "mint": "QueeZingMintTwo22222222222222222222222222222",
+      "signature": "queezing-create-two",
+      "slot": 201,
+      "observedAtMs": 2000100,
+      "blockTimeMs": 1999100,
+      "bondingCurve": "QueeZingCurveTwo222222222222222222222222222",
+      "creator": "QueeZingCreator11111111111111111111111111111",
+      "isCashbackEnabled": false,
+      "isMayhemMode": false,
+      "name": "QUEEZING",
+      "quoteMint": "So11111111111111111111111111111111111111112",
+      "symbol": "QUEEZING",
+      "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "tokenTotalSupplyBaseUnits": "1000000000000000",
+      "uri": "https://example.invalid/q2.json",
+      "virtualSolReservesLamports": "23177200000",
+      "virtualTokenReservesBaseUnits": "1073000000000000"
+    }
+  ]
+}

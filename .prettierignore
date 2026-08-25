@@ -1,0 +1,5 @@
+node_modules
+dist
+apps/dashboard/dist
+data
+package-lock.json

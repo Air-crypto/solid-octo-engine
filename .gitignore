@@ -1,0 +1,15 @@
+node_modules/
+dist/
+apps/dashboard/dist/
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.db-*
+data/*.jsonl
+*.log
+.DS_Store
+coverage/
+**/*keypair*.json
+*.pem
+*.tsbuildinfo
