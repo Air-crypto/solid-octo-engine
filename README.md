@@ -52,6 +52,45 @@ Open [http://127.0.0.1:8787](http://127.0.0.1:8787). The default mode is `shadow
 
 Use authenticated private Solana HTTP/WebSocket endpoints for continuous operation. The public endpoints are only safe defaults for setup and will rate-limit or stall.
 
+## Configure a private Solana RPC
+
+A private RPC is an authenticated gateway to Solana; it is not a wallet and cannot move funds by itself. The provider does not need—and must never receive—your Phantom password, recovery phrase, or execution-wallet keypair.
+
+Keep the desk disarmed while changing RPC configuration. The simplest setup is [Helius](https://dashboard.helius.dev/):
+
+1. Create a Helius account and project, then create an API key in the dashboard.
+2. Use **mainnet**, not devnet.
+3. Put the matching HTTP and WebSocket endpoints in the local `.env` file:
+
+   ```dotenv
+   SOLANA_RPC_HTTP_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY
+   SOLANA_RPC_WS_URL=wss://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY
+   ```
+
+   These are the documented Helius [HTTP authentication](https://www.helius.dev/docs/api-reference/authentication) and [WebSocket](https://www.helius.dev/docs/rpc/websocket/quickstart) formats.
+
+[QuickNode](https://www.quicknode.com/docs/solana/quickstart) is an alternative: create a Solana `mainnet-beta` endpoint and copy both provider URLs from its dashboard. A QuickNode pair normally resembles:
+
+```dotenv
+SOLANA_RPC_HTTP_URL=https://YOUR_ENDPOINT.solana-mainnet.quiknode.pro/YOUR_TOKEN/
+SOLANA_RPC_WS_URL=wss://YOUR_ENDPOINT.solana-mainnet.quiknode.pro/YOUR_TOKEN/
+```
+
+Treat either pair as secrets because the URLs contain billable credentials. Keep them out of chat, Bot prompts, screenshots, shell output, commits, and browser-delivered client code. `.env` is ignored by Git. If a Grok connected-service card says the value is stored securely and never shown to the Bot, its secret field can hold the HTTP URL; add the WebSocket URL as a separate `SOLANA_RPC_WS_URL` secret. Do not paste either value into an ordinary Grok conversation.
+
+### Validate before live use
+
+Restart with `DESK_MODE=shadow`, then verify the dashboard and [`/api/health`](http://127.0.0.1:8787/api/health). Do not arm live until a forward run shows all of the following:
+
+- The event stream stays healthy and receives fresh slots.
+- The price oracle stays healthy.
+- Real candidate risk reports complete successfully, including `getTokenLargestAccounts`; no required field is `unknown`.
+- There are no recurring RPC `403`, `429`, timeout, or WebSocket disconnect errors.
+- Risk checks finish inside the configured deadline under normal candidate load.
+- The engine remains fail-closed when the RPC is deliberately made unavailable.
+
+If public-RPC errors disappear but the private endpoint still rate-limits or misses the risk deadline, raise the provider capacity or choose a lower-latency plan/region. Do not bypass holder checks, increase risk, or relax the fail-closed policy merely to make the health indicator pass.
+
 ## Execution modes
 
 | Mode     | Signer                                    |                               Can spend SOL? | Intended use                                      |
