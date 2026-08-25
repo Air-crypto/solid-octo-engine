@@ -85,6 +85,13 @@ export interface PolicyConfig {
   armLeaseMaxMs: number;
   defaultSpendUsdCents: number;
   entryMarketCapUsd: number;
+  exitIntentTtlMs: number;
+  exitMaxAttempts: number;
+  exitRetryCooldownMs: number;
+  exitRetryDelayMs: number;
+  holdRiskFailureKillThreshold: number;
+  holdRiskRetryDelayMs: number;
+  holdRiskTimeoutMs: number;
   intentTtlMs: number;
   maxAgeMs: number;
   maxCreatorHolderPct: number;
@@ -92,7 +99,6 @@ export interface PolicyConfig {
   maxOpenPositions: number;
   maxOracleSpreadPct: number;
   maxPriceAgeMs: number;
-  minRugcheckLpLockedPct: number;
   maxSlippageBps: number;
   maxSpendUsdCents: number;
   maxTopHolderPct: number;
@@ -107,6 +113,7 @@ export interface PolicyConfig {
   riskReadinessRetryDelayMs: number;
   riskTimeoutMs: number;
   spikeCeilingMarketCapUsd: number;
+  stopLossPct: number;
   takeProfitPct: number;
   takeProfitSellFraction: number;
   timeStopMs: number;
@@ -273,7 +280,7 @@ export interface PortfolioSnapshot {
 }
 
 export type ExitReason =
-  "take_profit" | "trailing_stop" | "time_stop" | "kill_switch";
+  "take_profit" | "stop_loss" | "trailing_stop" | "time_stop" | "kill_switch";
 
 export interface ExitDecision {
   fraction: number;

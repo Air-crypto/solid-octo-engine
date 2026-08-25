@@ -18,7 +18,7 @@ flowchart LR
   PH --> L[(SQLite audit ledger)]
   KP --> L
   PA --> L
-  L --> E[Exit state machine\n50% at +40%\n20% trail\n12m stop]
+  L --> E[Exit state machine\n-15% initial stop\n50% at +40%\n20% trail / 12m stop]
   E --> L
   H[Head controls\narm / disarm / kill] --> I
   H --> E
@@ -30,10 +30,11 @@ flowchart LR
 - Exact mint identity. Names and symbols are display-only, so same-name remints remain separate candidates.
 - Bonding-curve market-cap computation and a strict crossing rule: below `$3,200` on the previous event, at or above it now, age at most 30 seconds, and high-water market cap still below `$4,000`.
 - Median SOL/USD mark with staleness, source-count, and spread gates. Dexscreener is not in the entry path.
-- On-chain mint/freeze authority, token program, canonical Pump curve owner/PDA, curve-excluded holder concentration, creator holdings, Rugcheck LP-lock percentage, and insider networks. Any required unknown is a kill.
+- On-chain mint/freeze authority, token program, canonical Pump curve owner/PDA, curve-excluded holder concentration, creator holdings, and Rugcheck availability/insider networks. Before graduation, Rugcheck LP metadata is informational because the canonical Pump bonding curve—not an AMM LP position—holds liquidity. Any required entry unknown is a kill.
 - One immutable buy intent per mint, short intent expiry, bounded spend, daily cap, position cap, wallet binding, risk/policy hashes, transaction simulation, and program allowlisting.
 - Durable SQLite ledger in WAL/FULL mode for candidates, risk reports, intents, executions, positions, 30-second portfolio marks, and control state. High-volume operational events are retained for 24 hours and capped at 50,000 rows by default.
-- Exit state machine: sell half at `+40%`, trail the remainder by `20%`, close at 12 minutes, and allow emergency exits even while new buys are disarmed.
+- Exit state machine: close at `-15%` before take-profit, sell half at `+40%`, trail the remainder by `20%`, close at 12 minutes, and allow emergency exits even while new buys are disarmed. The stop is triggered by the latest event-derived bonding-curve market cap, so it bounds engine behavior but cannot guarantee a fill price.
+- Exit execution uses a separate 10-second TTL and at most three fresh intents at the same 5% slippage cap. Only failures proven to occur before broadcast are retried. An ambiguous broadcast is never repeated automatically; the position stays `closing`, the kill switch engages, and reconciliation becomes an operator action.
 
 ## Quick start
 
@@ -114,7 +115,7 @@ The deterministic HTTP schedule is:
 - idle: one `getSlot` health probe per minute, about 43,200 standard calls in a 30-day month;
 - each exact classic SPL mint that reaches Risk: normally three concurrent standard RPC calls, at most nine if the mint/index is not ready and both bounded retries are used;
 - each exact Token-2022 mint that reaches Risk on Helius: normally two calls (one batched mint/curve read plus one `getProgramAccountsV2` holder scan), at most six with both bounded retries; more than 10,000 token accounts fails closed because multiple pages cannot provide one consistent holder snapshot;
-- each open position: the matching classic or Token-2022 snapshot every 15 seconds; a normal Token-2022 position therefore uses at most 96 calls during the 12-minute maximum hold;
+- each open position: the matching classic or Token-2022 snapshot every 15 seconds; a healthy Token-2022 position therefore uses at most 96 calls during the 12-minute maximum hold. A transient hold-check failure gets one retry after two seconds before the default kill threshold, adding at most one snapshot for that incident;
 - startup/recovery: one signature-list call plus up to 100 transaction reads only when a durable checkpoint exists;
 - live execution: simulation, send, confirmation, parsed-transaction reconciliation, and any address-lookup-table reads.
 

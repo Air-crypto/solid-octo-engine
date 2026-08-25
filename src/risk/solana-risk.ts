@@ -160,23 +160,15 @@ export class SolanaRiskProvider implements RiskProvider {
             rugcheck.summaryRaw,
           )
         : { detail: "optional", name: "rugcheck_available", status: "pass" },
-      policy.requireRugcheck
-        ? rugcheck.lpLockedPct == null
-          ? {
-              detail: "Rugcheck did not return lpLockedPct",
-              name: "rugcheck_lp_locked_pct",
-              status: "unknown",
-            }
-          : check(
-              "rugcheck_lp_locked_pct",
-              rugcheck.lpLockedPct >= policy.minRugcheckLpLockedPct,
-              `${rugcheck.lpLockedPct.toFixed(2)}%`,
-            )
-        : {
-            detail: "optional",
-            name: "rugcheck_lp_locked_pct",
-            status: "pass",
-          },
+      {
+        detail:
+          rugcheck.lpLockedPct == null
+            ? "not applicable before Pump graduation"
+            : rugcheck.lpLockedPct.toFixed(2) +
+              "% reported; informational before Pump graduation",
+        name: "rugcheck_lp_locked_pct",
+        status: "pass",
+      },
       policy.requireInsidersZero
         ? rugcheck.insiderNetworks == null
           ? {

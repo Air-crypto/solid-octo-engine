@@ -11,9 +11,15 @@ import type {
 } from "../domain/types.js";
 import type { ControlPlane } from "../core/control.js";
 import type {
+  BuiltTransaction,
   ExecutionContext,
   Executor,
   TransactionBuilder,
+} from "./types.js";
+import {
+  ExecutionError,
+  asExecutionError,
+  describePumpSimulationError,
 } from "./types.js";
 import {
   feeLamportsFromTransaction,
@@ -38,16 +44,32 @@ abstract class BaseExecutor implements Executor {
     intent: OrderIntent,
     context: ExecutionContext,
   ): void {
-    if (this.clock() >= intent.expiresAtMs) throw new Error("intent expired");
+    if (this.clock() >= intent.expiresAtMs)
+      throw new ExecutionError("intent expired", "intent", false, false);
     if (intent.mint !== context.mintState.mint)
-      throw new Error("intent mint does not match candidate");
+      throw new ExecutionError(
+        "intent mint does not match candidate",
+        "validation",
+        false,
+        false,
+      );
     if (
       intent.riskSnapshotHash !== context.riskReport.rawHash ||
       !context.riskReport.passed
     )
-      throw new Error("risk snapshot is invalid or failed");
+      throw new ExecutionError(
+        "risk snapshot is invalid or failed",
+        "validation",
+        false,
+        false,
+      );
     if (intent.wallet !== this.wallet)
-      throw new Error("intent wallet mismatch");
+      throw new ExecutionError(
+        "intent wallet mismatch",
+        "validation",
+        false,
+        false,
+      );
   }
 }
 
@@ -70,10 +92,15 @@ export class ShadowExecutor extends BaseExecutor {
     this.validateIntent(intent, context);
     let expectedTokenAmountBaseUnits: string | undefined;
     if (this.builder) {
-      const built =
-        intent.side === "buy"
-          ? await this.builder.buildBuy(intent)
-          : await this.builder.buildSell(intent);
+      let built: BuiltTransaction;
+      try {
+        built =
+          intent.side === "buy"
+            ? await this.builder.buildBuy(intent)
+            : await this.builder.buildSell(intent);
+      } catch (error) {
+        throw asExecutionError(error, "build", true, false);
+      }
       expectedTokenAmountBaseUnits = built.expectedOutAmountBaseUnits;
     }
     return {
@@ -105,16 +132,25 @@ export class ManualPhantomExecutor extends BaseExecutor {
     context: ExecutionContext,
   ): Promise<ExecutionResult> {
     this.validateIntent(intent, context);
-    const built =
-      intent.side === "buy"
-        ? await this.builder.buildBuy(intent)
-        : await this.builder.buildSell(intent);
-    await validateBuiltTransaction({
-      connection: this.connection,
-      expectedMint: intent.mint,
-      expectedWallet: this.wallet,
-      transactionBase64: built.transactionBase64,
-    });
+    let built: BuiltTransaction;
+    try {
+      built =
+        intent.side === "buy"
+          ? await this.builder.buildBuy(intent)
+          : await this.builder.buildSell(intent);
+    } catch (error) {
+      throw asExecutionError(error, "build", true, false);
+    }
+    try {
+      await validateBuiltTransaction({
+        connection: this.connection,
+        expectedMint: intent.mint,
+        expectedWallet: this.wallet,
+        transactionBase64: built.transactionBase64,
+      });
+    } catch (error) {
+      throw asExecutionError(error, "validation", false, false);
+    }
     return {
       expectedTokenAmountBaseUnits: built.expectedOutAmountBaseUnits,
       intentId: intent.id,
@@ -158,64 +194,119 @@ export class LocalKeypairExecutor extends BaseExecutor {
     this.validateIntent(intent, context);
     if (intent.side === "buy") {
       const control = this.control.canExecute();
-      if (!control.allowed) throw new Error(control.reason);
+      if (!control.allowed)
+        throw new ExecutionError(control.reason, "control", false, false);
     }
-    const built =
-      intent.side === "buy"
-        ? await this.builder.buildBuy(intent)
-        : await this.builder.buildSell(intent);
-    const transaction = await validateBuiltTransaction({
-      connection: this.connection,
-      expectedMint: intent.mint,
-      expectedWallet: this.wallet,
-      transactionBase64: built.transactionBase64,
-    });
+    let built: BuiltTransaction;
+    try {
+      built =
+        intent.side === "buy"
+          ? await this.builder.buildBuy(intent)
+          : await this.builder.buildSell(intent);
+    } catch (error) {
+      throw asExecutionError(error, "build", true, false);
+    }
+    let transaction: VersionedTransaction;
+    try {
+      transaction = await validateBuiltTransaction({
+        connection: this.connection,
+        expectedMint: intent.mint,
+        expectedWallet: this.wallet,
+        transactionBase64: built.transactionBase64,
+      });
+    } catch (error) {
+      throw asExecutionError(error, "validation", false, false);
+    }
     this.recheckBuyControls(intent);
     transaction.sign([this.keypair]);
-    const simulation = await this.connection.simulateTransaction(transaction, {
-      commitment: "confirmed",
-      sigVerify: true,
-    });
+    let simulation;
+    try {
+      simulation = await this.connection.simulateTransaction(transaction, {
+        commitment: "confirmed",
+        sigVerify: true,
+      });
+    } catch (error) {
+      throw asExecutionError(error, "simulation", true, false);
+    }
     if (simulation.value.err)
-      throw new Error(
-        `transaction simulation failed: ${JSON.stringify(simulation.value.err)}`,
+      throw new ExecutionError(
+        describePumpSimulationError(simulation.value.err, intent.side),
+        "simulation",
+        true,
+        false,
       );
     if (Date.now() >= intent.expiresAtMs)
-      throw new Error("intent expired before broadcast");
-    this.recheckBuyControls(intent);
-    const signature = await this.connection.sendRawTransaction(
-      transaction.serialize(),
-      { maxRetries: 2, preflightCommitment: "confirmed", skipPreflight: false },
-    );
-    const confirmation = await this.connection.confirmTransaction(
-      signature,
-      "confirmed",
-    );
-    if (confirmation.value.err)
-      throw new Error(
-        `transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+      throw new ExecutionError(
+        "intent expired before broadcast",
+        "intent",
+        true,
+        false,
       );
-    const confirmedTransaction = await validateConfirmedSignature({
-      connection: this.connection,
-      expectedMint: intent.mint,
-      expectedWallet: this.wallet,
-      signature,
-    });
-    const actualTokenAmountBaseUnits = tokenDeltaFromTransaction({
-      mint: intent.mint,
-      side: intent.side,
-      transaction: confirmedTransaction,
-      wallet: this.wallet,
-    }).toString();
-    return {
-      actualSolDeltaLamports: nativeSolDeltaFromTransaction({
+    this.recheckBuyControls(intent);
+    let signature: string;
+    try {
+      signature = await this.connection.sendRawTransaction(
+        transaction.serialize(),
+        {
+          maxRetries: 2,
+          preflightCommitment: "confirmed",
+          skipPreflight: false,
+        },
+      );
+    } catch (error) {
+      throw asExecutionError(error, "broadcast", false, true);
+    }
+    let confirmation;
+    try {
+      confirmation = await this.connection.confirmTransaction(
+        signature,
+        "confirmed",
+      );
+    } catch (error) {
+      throw asExecutionError(error, "confirmation", false, true);
+    }
+    if (confirmation.value.err)
+      throw new ExecutionError(
+        "transaction failed: " + JSON.stringify(confirmation.value.err),
+        "confirmation",
+        false,
+        true,
+      );
+    let confirmedTransaction;
+    try {
+      confirmedTransaction = await validateConfirmedSignature({
+        connection: this.connection,
+        expectedMint: intent.mint,
+        expectedWallet: this.wallet,
+        signature,
+      });
+    } catch (error) {
+      throw asExecutionError(error, "reconciliation", false, true);
+    }
+    let actualTokenAmountBaseUnits: string;
+    let actualSolDeltaLamports: string;
+    let feeLamports: string;
+    try {
+      actualTokenAmountBaseUnits = tokenDeltaFromTransaction({
+        mint: intent.mint,
+        side: intent.side,
         transaction: confirmedTransaction,
         wallet: this.wallet,
-      }).toString(),
+      }).toString();
+      actualSolDeltaLamports = nativeSolDeltaFromTransaction({
+        transaction: confirmedTransaction,
+        wallet: this.wallet,
+      }).toString();
+      feeLamports = feeLamportsFromTransaction(confirmedTransaction).toString();
+    } catch (error) {
+      throw asExecutionError(error, "reconciliation", false, true);
+    }
+    return {
+      actualSolDeltaLamports,
       actualTokenAmountBaseUnits,
       confirmedAtMs: Date.now(),
       expectedTokenAmountBaseUnits: built.expectedOutAmountBaseUnits,
-      feeLamports: feeLamportsFromTransaction(confirmedTransaction).toString(),
+      feeLamports,
       intentId: intent.id,
       mode: "live",
       observedSolUsd: context.solUsd,
@@ -227,7 +318,8 @@ export class LocalKeypairExecutor extends BaseExecutor {
   private recheckBuyControls(intent: OrderIntent): void {
     if (intent.side !== "buy") return;
     const control = this.control.canExecute();
-    if (!control.allowed) throw new Error(control.reason);
+    if (!control.allowed)
+      throw new ExecutionError(control.reason, "control", false, false);
   }
 }
 

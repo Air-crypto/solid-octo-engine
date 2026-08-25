@@ -57,7 +57,9 @@ Name and symbol do not participate in identity. `one_buy_per_mint_idx` makes a s
 
 Before Pump graduation there is no conventional AMM LP position to lock; liquidity is held by the canonical Pump bonding-curve program. Therefore the early-launch deterministic equivalent is an exact canonical bonding-curve PDA and owner check. Rugcheck remains a required independent availability/insider source by default. After graduation this version does not open a new position, because the requested entry window is pre-graduation.
 
-Risk inputs and bounded raw evidence are hashed into the order intent. `unknown` is not a soft warning: any required unknown makes `passed=false`. Classic SPL Token snapshots use three concurrent calls: a batched mint/curve account read, largest token accounts, and creator-owned token accounts. Token-2022 does not support `getTokenLargestAccounts`, so its snapshot instead combines the batched mint/curve read with a mint-filtered token-program scan. The scan returns only each account's owner and raw amount, has no fixed-size filter so Token-2022 extensions remain valid, and derives both curve-excluded concentration checks from the same slot-bounded account set. Helius uses `getProgramAccountsV2`; other providers use standard `getProgramAccounts`. A Helius response requiring another page fails closed because separately evaluated pages cannot prove one consistent holder snapshot. Fresh-index retries are bounded to twice by default. Rugcheck summary and insider-network endpoints run concurrently with the on-chain snapshot. Only one entry or position risk snapshot owns the gate at a time. Open positions are rechecked every 15 seconds; a failure, error, or timeout engages the kill switch and requests a full exit.
+Risk inputs and bounded raw evidence are hashed into the order intent. `unknown` is not a soft warning at entry: any required unknown makes `passed=false`. Classic SPL Token snapshots use three concurrent calls: a batched mint/curve account read, largest token accounts, and creator-owned token accounts. Token-2022 does not support `getTokenLargestAccounts`, so its snapshot instead combines the batched mint/curve read with a mint-filtered token-program scan. The scan returns only each account's owner and raw amount, has no fixed-size filter so Token-2022 extensions remain valid, and derives both curve-excluded concentration checks from the same slot-bounded account set. Helius uses `getProgramAccountsV2`; other providers use standard `getProgramAccounts`. A Helius response requiring another page fails closed because separately evaluated pages cannot prove one consistent holder snapshot. Fresh-index retries are bounded to twice by default. Rugcheck summary and insider-network endpoints run concurrently with the on-chain snapshot. Only one entry or position risk snapshot owns the gate at a time.
+
+Open positions are normally rechecked every 15 seconds with a separate three-second deadline. A confirmed hard failure—authority, program, canonical curve, holder concentration, or insider evidence—engages the kill switch and requests a full exit immediately. A provider error, timeout, `unknown`, or otherwise unclassified failed report first disarms new buys, marks Risk degraded, and retries after two seconds. Two consecutive uncertain checks engage the kill switch. A passing check resets the counter. This preserves fail-closed behavior without turning one transient Rugcheck timeout into false rug evidence.
 
 ## Execution invariants
 
@@ -65,6 +67,7 @@ Risk inputs and bounded raw evidence are hashed into the order intent. `unknown`
 - A buy is impossible in live mode without a valid arm lease; a sell remains possible so the arm gate cannot trap an emergency exit.
 - The transaction returned by the builder is untrusted input and is inspected before signing.
 - A live transaction is simulated with signature verification before broadcast.
+- Pump simulation errors `6002` (`TooMuchSolRequired`) and `6003` (`TooLittleSolReceived`) are pre-broadcast slippage rejections, not fills. A rejected buy is terminal for that exact candidate and disarms further buys, but does not require a process restart.
 - Manual mode does not mark a fill from the popup response alone; it validates the fetched confirmed transaction.
 - Dashboard state comes from the ledger, not Bot messages.
 - Portfolio accounting records confirmed native/token deltas and fees when available, estimates open value from the bonding-curve market cap, and writes mode- and wallet-scoped 30-second marks. Pre-schema positions remain explicitly unvalued instead of receiving fabricated P&L.
@@ -75,6 +78,7 @@ Risk inputs and bounded raw evidence are hashed into the order intent. `unknown`
 stateDiagram-v2
   [*] --> Open: confirmed or paper fill
   Open --> Open: update high-water
+  Open --> Closed: market cap <= entry * 0.85
   Open --> Scaled: market cap >= entry * 1.40 / sell 50%
   Scaled --> Closed: market cap <= high-water * 0.80
   Open --> Closed: age >= 12 minutes
@@ -83,7 +87,7 @@ stateDiagram-v2
   Scaled --> Closed: kill switch or risk failure
 ```
 
-The SQLite record is the source of truth. Failed exit submission returns the position to `open` and emits an auditable failure; it never fabricates a close.
+The SQLite record is the source of truth. Every exit attempt gets a fresh immutable intent, a 10-second TTL, and the same configured slippage ceiling; the engine never widens slippage between attempts. A pre-broadcast build/simulation failure may retry up to three times, then returns the position to `open` for a two-second cooldown and continued monitoring. Once broadcast may have occurred, automatic retries stop to prevent a duplicate sell: the position stays `closing`, the kill switch engages, and a human must reconcile the signature/balances. No failure path fabricates a close.
 
 ## Recovery behavior
 

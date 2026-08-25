@@ -16,6 +16,7 @@ import type { PriceOracle } from "../adapters/price-oracle.js";
 import type { PumpEventSource } from "../adapters/pump-events.js";
 import type { RiskProvider } from "../risk/types.js";
 import type { Executor } from "../execution/types.js";
+import { ExecutionError } from "../execution/types.js";
 import type { Ledger } from "../storage/ledger.js";
 import { CandidateStore } from "./candidate-store.js";
 import type { ControlPlane } from "./control.js";
@@ -32,6 +33,7 @@ import {
 } from "../execution/token-balance.js";
 import { validateConfirmedSignature } from "../execution/transaction-guard.js";
 import { buildPortfolio } from "./portfolio.js";
+import { classifyHoldRisk } from "./hold-risk.js";
 
 export class MintDeskEngine {
   readonly bus: DeskEventBus;
@@ -39,12 +41,17 @@ export class MintDeskEngine {
   readonly health = new HealthRegistry();
   private readonly processing = new Set<string>();
   private readonly eventChains = new Map<string, Promise<void>>();
+  private readonly exitRetryNotBefore = new Map<string, number>();
   private consecutiveRiskFailures = 0;
   private lastPassingRiskAtMs: number | null = null;
   private lastPortfolioMarkAtMs = 0;
   private latestSolMark: PriceMark | null = null;
   private rpcHealthTimer: NodeJS.Timeout | null = null;
   private monitorTimer: NodeJS.Timeout | null = null;
+  private readonly positionRiskState = new Map<
+    string,
+    { consecutiveUncertain: number; nextCheckAtMs: number }
+  >();
   private riskBusy = false;
   private readonly sessionStartedAtMs = Date.now();
   private started = false;
@@ -86,7 +93,7 @@ export class MintDeskEngine {
         void this.monitorOpenPositions().catch((error) =>
           this.handleBackgroundFailure("position_monitor", error),
         ),
-      15_000,
+      1_000,
     );
     this.rpcHealthTimer = setInterval(
       () => void this.refreshRpcHealth(),
@@ -533,13 +540,28 @@ export class MintDeskEngine {
     } catch (error) {
       this.ledger.updateIntentStatus(intent.id, "rejected");
       this.candidates.setPhase(state.mint, "killed");
-      this.health.set("execution", "down", errorMessage(error));
+      const candidateRejection =
+        error instanceof ExecutionError &&
+        !error.broadcastPossible &&
+        ["intent", "control", "build", "simulation"].includes(error.stage);
+      if (candidateRejection) {
+        this.control.disarm();
+        this.health.heartbeat(
+          "execution",
+          "candidate rejected before broadcast: " + errorMessage(error),
+        );
+      } else {
+        this.health.set("execution", "down", errorMessage(error));
+      }
       this.bus.emit("sniper", "execution.rejected", {
+        broadcastPossible:
+          error instanceof ExecutionError ? error.broadcastPossible : null,
         intentId: intent.id,
         mint: intent.mint,
         reason: errorMessage(error),
+        stage: error instanceof ExecutionError ? error.stage : "unknown",
       });
-      if (this.mode === "live")
+      if (this.mode === "live" && !candidateRejection)
         await this.engageKillSwitch("execution_health_degraded");
     }
   }
@@ -575,6 +597,10 @@ export class MintDeskEngine {
       wallet: intent.wallet,
     };
     this.ledger.upsertPosition(position);
+    this.positionRiskState.set(position.id, {
+      consecutiveUncertain: 0,
+      nextCheckAtMs: position.entryTimeMs + 15_000,
+    });
     this.candidates.setPhase(state.mint, "confirmed");
     this.bus.emit("finance", "position.opened", position);
     return position;
@@ -604,6 +630,14 @@ export class MintDeskEngine {
       : evaluateExit(position, state.currentMarketCapUsd, this.policy, nowMs);
     this.ledger.upsertPosition(position);
     if (!decision.triggered) return;
+    const retryNotBefore = this.exitRetryNotBefore.get(position.id) ?? 0;
+    if (nowMs < retryNotBefore) {
+      this.bus.emitTransient("exit", "exit.retry_deferred", {
+        positionId: position.id,
+        retryAtMs: retryNotBefore,
+      });
+      return;
+    }
 
     const amount =
       decision.fraction >= 1
@@ -615,33 +649,19 @@ export class MintDeskEngine {
     position.status = "closing";
     this.ledger.upsertPosition(position);
     const exitRisk = syntheticExitRisk(state);
-    const intent: OrderIntent = {
-      createdAtMs: nowMs,
-      expiresAtMs: nowMs + this.policy.intentTtlMs,
-      id: newId("sell"),
-      maxLamports: "0",
-      maxSlippageBps: this.policy.maxSlippageBps,
-      mint: state.mint,
-      policySnapshotHash: stableHash({ decision, positionId: position.id }),
-      riskSnapshotHash: exitRisk.rawHash,
-      side: "sell",
-      tokenAmountBaseUnits: amount.toString(),
-      wallet: position.wallet,
-    };
-    this.ledger.createIntent(intent);
     this.bus.emit("exit", "exit.triggered", {
+      amountBaseUnits: amount.toString(),
       decision,
-      intent: redactIntent(intent),
       positionId: position.id,
     });
     try {
-      const result = await this.executor.execute(intent, {
-        mintState: state,
-        riskReport: exitRisk,
-        solUsd: this.latestSolMark?.priceUsd,
+      const result = await this.executeExitWithRetries({
+        amount,
+        decision,
+        exitRisk,
+        position,
+        state,
       });
-      this.ledger.saveExecution(result);
-      this.ledger.updateIntentStatus(intent.id, result.status);
       if (result.status === "paper_filled" || result.status === "confirmed") {
         const filled = result.actualTokenAmountBaseUnits
           ? BigInt(result.actualTokenAmountBaseUnits)
@@ -657,6 +677,8 @@ export class MintDeskEngine {
         );
         this.ledger.upsertPosition(position);
         const closed = BigInt(position.remainingTokenBaseUnits) === 0n;
+        this.exitRetryNotBefore.delete(position.id);
+        if (closed) this.positionRiskState.delete(position.id);
         this.candidates.setPhase(state.mint, closed ? "closed" : "confirmed");
         this.bus.emit(
           "finance",
@@ -665,32 +687,151 @@ export class MintDeskEngine {
         );
         this.maybeRecordPortfolioMark(result.confirmedAtMs ?? nowMs, true);
       } else if (
-        result.status !== "awaiting_manual_signature" &&
-        result.status !== "submitted"
+        result.status === "awaiting_manual_signature" ||
+        result.status === "submitted"
       ) {
+        this.bus.emit("exit", "exit.reconciliation_pending", {
+          intentId: result.intentId,
+          positionId: position.id,
+          signature: result.signature,
+          status: result.status,
+        });
+      } else {
         position.status = "open";
         this.ledger.upsertPosition(position);
       }
     } catch (error) {
-      position.status = "open";
+      const failure =
+        error instanceof ExecutionError
+          ? error
+          : new ExecutionError(errorMessage(error), "build", false, false);
+      if (failure.broadcastPossible || !failure.safeToRetry) {
+        position.status = "closing";
+        this.control.engageKillSwitch();
+        this.bus.emit("head", "control.kill_switch", {
+          engaged: true,
+          reason: "exit_operator_action_required",
+        });
+        this.health.set("execution", "down", errorMessage(error));
+        this.bus.emit("exit", "exit.operator_action_required", {
+          broadcastPossible: failure.broadcastPossible,
+          mint: state.mint,
+          positionId: position.id,
+          reason: errorMessage(error),
+          stage: failure.stage,
+        });
+      } else {
+        position.status = "open";
+        this.exitRetryNotBefore.set(
+          position.id,
+          Date.now() + this.policy.exitRetryCooldownMs,
+        );
+        this.bus.emit("exit", "exit.failed", {
+          mint: state.mint,
+          positionId: position.id,
+          reason: errorMessage(error),
+          retryAtMs: this.exitRetryNotBefore.get(position.id),
+        });
+      }
       this.ledger.upsertPosition(position);
-      this.bus.emit("exit", "exit.failed", {
-        mint: state.mint,
-        positionId: position.id,
-        reason: errorMessage(error),
-      });
     }
   }
 
+  private async executeExitWithRetries(input: {
+    amount: bigint;
+    decision: ReturnType<typeof evaluateExit>;
+    exitRisk: RiskReport;
+    position: Position;
+    state: MintState;
+  }): Promise<ExecutionResult> {
+    let lastError: ExecutionError | null = null;
+    for (
+      let attempt = 1;
+      attempt <= this.policy.exitMaxAttempts;
+      attempt += 1
+    ) {
+      const createdAtMs = Date.now();
+      const intent: OrderIntent = {
+        createdAtMs,
+        expiresAtMs: createdAtMs + this.policy.exitIntentTtlMs,
+        id: newId("sell"),
+        maxLamports: "0",
+        maxSlippageBps: this.policy.maxSlippageBps,
+        mint: input.state.mint,
+        policySnapshotHash: stableHash({
+          attempt,
+          decision: input.decision,
+          positionId: input.position.id,
+        }),
+        riskSnapshotHash: input.exitRisk.rawHash,
+        side: "sell",
+        tokenAmountBaseUnits: input.amount.toString(),
+        wallet: input.position.wallet,
+      };
+      if (!this.ledger.createIntent(intent))
+        throw new ExecutionError(
+          "duplicate exit intent rejected",
+          "intent",
+          false,
+          false,
+        );
+      this.bus.emit("exit", "exit.attempt_started", {
+        attempt,
+        intent: redactIntent(intent),
+        maxAttempts: this.policy.exitMaxAttempts,
+        positionId: input.position.id,
+      });
+      try {
+        const result = await this.executor.execute(intent, {
+          mintState: input.state,
+          riskReport: input.exitRisk,
+          solUsd: this.latestSolMark?.priceUsd,
+        });
+        this.ledger.saveExecution(result);
+        this.ledger.updateIntentStatus(intent.id, result.status);
+        return result;
+      } catch (error) {
+        const failure =
+          error instanceof ExecutionError
+            ? error
+            : new ExecutionError(errorMessage(error), "build", false, false);
+        lastError = failure;
+        this.ledger.updateIntentStatus(intent.id, "rejected");
+        this.bus.emit("exit", "exit.attempt_failed", {
+          attempt,
+          broadcastPossible: failure.broadcastPossible,
+          maxAttempts: this.policy.exitMaxAttempts,
+          positionId: input.position.id,
+          reason: failure.message,
+          safeToRetry: failure.safeToRetry,
+          stage: failure.stage,
+        });
+        if (
+          !failure.safeToRetry ||
+          failure.broadcastPossible ||
+          attempt >= this.policy.exitMaxAttempts
+        )
+          throw failure;
+        await delay(this.policy.exitRetryDelayMs);
+      }
+    }
+    throw (
+      lastError ??
+      new ExecutionError("exit attempts exhausted", "build", true, false)
+    );
+  }
+
   private async monitorOpenPositions(): Promise<void> {
-    for (const position of this.ledger
+    const nowMs = Date.now();
+    const positions = this.ledger
       .listPositions(true)
       .filter(
         (item) =>
           item.status === "open" &&
           item.mode === this.mode &&
           item.wallet === this.executor.wallet,
-      )) {
+      );
+    for (const position of positions) {
       const state = this.candidates.get(position.mint);
       if (!state) {
         await this.engageKillSwitch("position_state_missing");
@@ -700,6 +841,22 @@ export class MintDeskEngine {
         });
         continue;
       }
+      // Exit policy must keep progressing even when no new Pump trade event
+      // arrives. This also retries a pre-broadcast stop/kill exit after its
+      // bounded cooldown without waiting for another market-data callback.
+      await this.evaluateOpenPosition(state, nowMs);
+      const currentPosition = this.ledger
+        .listPositions(true)
+        .find((item) => item.id === position.id && item.status === "open");
+      if (!currentPosition) continue;
+      if (this.control.snapshot(nowMs).killSwitch) {
+        continue;
+      }
+      const riskState = this.positionRiskState.get(currentPosition.id) ?? {
+        consecutiveUncertain: 0,
+        nextCheckAtMs: 0,
+      };
+      if (nowMs < riskState.nextCheckAtMs) continue;
       if (this.riskBusy) {
         this.bus.emitTransient("rug", "monitor.risk_deferred", {
           mint: position.mint,
@@ -709,31 +866,84 @@ export class MintDeskEngine {
       }
       this.riskBusy = true;
       try {
+        const holdPolicy = {
+          ...this.policy,
+          riskTimeoutMs: this.policy.holdRiskTimeoutMs,
+        };
         const report = await withTimeout(
-          this.risk.assess(state, this.policy),
-          this.policy.riskTimeoutMs,
+          this.risk.assess(state, holdPolicy),
+          this.policy.holdRiskTimeoutMs,
           "position risk recheck timed out",
         );
         this.ledger.saveRisk(report);
-        this.bus.emit(
-          "rug",
-          report.passed ? "monitor.risk_ok" : "monitor.risk_failed",
-          report,
-        );
-        if (!report.passed) {
-          await this.engageKillSwitch("position_risk_failed");
+        const classification = classifyHoldRisk(report);
+        if (classification.kind === "pass") {
+          this.positionRiskState.set(position.id, {
+            consecutiveUncertain: 0,
+            nextCheckAtMs: nowMs + 15_000,
+          });
+          this.lastPassingRiskAtMs = report.checkedAtMs;
+          this.health.heartbeat("risk", "position recheck passed");
+          this.bus.emit("rug", "monitor.risk_ok", report);
+        } else if (classification.kind === "hard_fail") {
+          this.bus.emit("rug", "monitor.risk_hard_fail", {
+            reasons: classification.reasons,
+            report,
+          });
+          await this.engageKillSwitch("position_risk_hard_fail");
+        } else {
+          await this.handleHoldRiskUncertainty(
+            currentPosition,
+            classification.reasons.join("; "),
+            nowMs,
+          );
         }
       } catch (error) {
-        this.bus.emit("rug", "monitor.risk_error", {
-          mint: position.mint,
-          reason: errorMessage(error),
-        });
-        await this.engageKillSwitch("position_risk_error");
+        await this.handleHoldRiskUncertainty(
+          currentPosition,
+          errorMessage(error),
+          nowMs,
+        );
       } finally {
         this.riskBusy = false;
       }
     }
     this.maybeRecordPortfolioMark(Date.now());
+  }
+
+  private async handleHoldRiskUncertainty(
+    position: Position,
+    reason: string,
+    nowMs: number,
+  ): Promise<void> {
+    const previous = this.positionRiskState.get(position.id);
+    const consecutiveUncertain = (previous?.consecutiveUncertain ?? 0) + 1;
+    this.positionRiskState.set(position.id, {
+      consecutiveUncertain,
+      nextCheckAtMs: nowMs + this.policy.holdRiskRetryDelayMs,
+    });
+    this.control.disarm();
+    this.health.set(
+      "risk",
+      "degraded",
+      "hold check uncertain " +
+        consecutiveUncertain +
+        "/" +
+        this.policy.holdRiskFailureKillThreshold +
+        ": " +
+        reason,
+    );
+    this.bus.emit("rug", "monitor.risk_uncertain", {
+      attempt: consecutiveUncertain,
+      killThreshold: this.policy.holdRiskFailureKillThreshold,
+      mint: position.mint,
+      positionId: position.id,
+      reason,
+      retryAtMs: nowMs + this.policy.holdRiskRetryDelayMs,
+    });
+    if (consecutiveUncertain >= this.policy.holdRiskFailureKillThreshold) {
+      await this.engageKillSwitch("position_risk_uncertain_threshold");
+    }
   }
 
   private async preflightInfrastructure(): Promise<void> {
@@ -1045,6 +1255,10 @@ function bigintRatio(numerator: bigint, denominator: bigint): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function withTimeout<T>(

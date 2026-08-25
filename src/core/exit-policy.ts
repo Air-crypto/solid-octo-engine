@@ -14,6 +14,9 @@ export function evaluateExit(
     ((currentMarketCapUsd - position.entryMarketCapUsd) /
       position.entryMarketCapUsd) *
     100;
+  if (returnPct <= -policy.stopLossPct) {
+    return { fraction: 1, reason: "stop_loss", triggered: true };
+  }
   const alreadyScaled =
     BigInt(position.remainingTokenBaseUnits) <
     BigInt(position.tokenAmountBaseUnits);

@@ -196,6 +196,59 @@ describe("fresh Pump risk snapshot", () => {
     );
   });
 
+  it("does not mistake pre-graduation Rugcheck LP metadata for AMM liquidity", async () => {
+    const mint = Keypair.generate().publicKey;
+    const creator = Keypair.generate().publicKey;
+    const curve = bondingCurvePda(mint);
+    const curveTokenAccount = getAssociatedTokenAddressSync(
+      mint,
+      curve,
+      true,
+      TOKEN_PROGRAM_ID,
+    );
+    const connection = {
+      getMultipleAccountsInfoAndContext: vi.fn(async () => ({
+        context: { slot: 12 },
+        value: [mintAccountInfo(TOKEN_PROGRAM_ID, 1_000n), curveAccountInfo()],
+      })),
+      getTokenAccountsByOwner: vi.fn(async () => ({
+        context: { slot: 12 },
+        value: [],
+      })),
+      getTokenLargestAccounts: vi.fn(async () => ({
+        context: { slot: 12 },
+        value: [
+          tokenAmount(curveTokenAccount, "900"),
+          tokenAmount(Keypair.generate().publicKey, "100"),
+        ],
+      })),
+    } as unknown as Connection;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.includes("/insiders/networks")
+          ? new Response("[]", { status: 200 })
+          : new Response(
+              JSON.stringify({ lpLockedPct: 0, risks: [], score: 0 }),
+              { status: 200 },
+            ),
+      ),
+    );
+
+    const report = await new SolanaRiskProvider(
+      connection,
+      "https://api.rugcheck.xyz/v1",
+    ).assess(mintState(mint, creator, curve, TOKEN_PROGRAM_ID), policy, 1_500);
+
+    expect(report.passed).toBe(true);
+    expect(
+      report.checks.find((check) => check.name === "rugcheck_lp_locked_pct"),
+    ).toMatchObject({
+      detail: expect.stringContaining("informational before Pump graduation"),
+      status: "pass",
+    });
+  });
+
   it("uses Helius V2 for Token-2022 and derives both concentration checks from one scan", async () => {
     const mint = Keypair.generate().publicKey;
     const creator = Keypair.generate().publicKey;

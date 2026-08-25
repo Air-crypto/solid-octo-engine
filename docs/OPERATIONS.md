@@ -76,6 +76,14 @@ The dashboard arm action requires the token and requests a lease no longer than 
 
 Live always starts disarmed. While disarmed, eligible exact mints may run Risk so the readiness gate can become current, but that candidate is terminally killed after Risk and is never remade. Only a later candidate can buy after the human arms the desk. Test all four controls before live funding.
 
+### Incident behavior
+
+- A buy simulation rejection such as Pump `6002 TooMuchSolRequired` is a miss before broadcast. That exact mint is terminal, live is disarmed, and the process stays healthy; do not restart or remake it.
+- A sell simulation rejection such as Pump `6003 TooLittleSolReceived` may retry with at most three fresh 10-second intents. Slippage remains fixed. After the bounded attempts, the position remains open and monitoring retries after a two-second cooldown.
+- A send/confirmation error where broadcast may have occurred is never retried automatically. The position remains `closing`, KILL remains engaged, and the operator must reconcile the signature plus wallet token/SOL balances before deciding any next action.
+- A first hold-risk timeout/provider error disarms live and retries after two seconds. A second consecutive uncertain check kills. Confirmed authority, program, curve, holder, or insider danger kills immediately.
+- Do not pull, rebuild, or restart over an `open` or `closing` live position unless the running process is unavailable and recovery is unavoidable. First disarm, engage KILL when safe, and reconcile the ledger against chain state.
+
 ## 6. Promotion criteria
 
 Require a time-bounded forward shadow report, not a successful synthetic replay. At minimum record:
@@ -86,7 +94,8 @@ Require a time-bounded forward shadow report, not a successful synthetic replay.
 - price source availability/spread and RPC heartbeat gaps;
 - expected versus actual output and realized slippage in manual tests;
 - restart/catch-up behavior;
-- kill, half-take-profit, trailing-stop, and time-stop outcomes.
+- kill, initial loss-stop, half-take-profit, trailing-stop, and time-stop outcomes;
+- bounded pre-broadcast exit retry and no-retry-after-ambiguous-broadcast behavior.
 
 Keep the live daily cap and wallet balance small. A passing gate only bounds mechanism risk; it does not validate alpha.
 

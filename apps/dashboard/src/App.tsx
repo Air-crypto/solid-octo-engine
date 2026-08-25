@@ -36,7 +36,7 @@ const ROLES: Array<{ role: Role; label: string; description: string }> = [
   {
     role: "exit",
     label: "EXIT",
-    description: "Scale-out, trail, and time stop",
+    description: "Loss stop, scale-out, trail, and time stop",
   },
   {
     role: "finance",

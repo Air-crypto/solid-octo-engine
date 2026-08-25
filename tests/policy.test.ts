@@ -89,6 +89,21 @@ describe("exit policy", () => {
     });
   });
 
+  it("cuts a position before take-profit when the initial loss limit is hit", () => {
+    expect(
+      evaluateExit(
+        position,
+        position.entryMarketCapUsd * (1 - policy.stopLossPct / 100),
+        policy,
+        now + 5_000,
+      ),
+    ).toMatchObject({
+      fraction: 1,
+      reason: "stop_loss",
+      triggered: true,
+    });
+  });
+
   it("trails only after scaling", () => {
     const scaled = {
       ...position,
