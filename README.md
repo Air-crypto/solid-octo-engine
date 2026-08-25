@@ -37,7 +37,7 @@ flowchart LR
 
 ## Quick start
 
-Requirements: Node.js 22.5 or newer and npm.
+Requirements: Node.js 24 or newer and npm. The current official Pump SDK/Anchor ESM bundle is not compatible with Node 22's CommonJS named-export behavior.
 
 ```bash
 npm ci
