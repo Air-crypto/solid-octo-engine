@@ -22,10 +22,35 @@ interface OnChainSnapshot {
   curveOwner: string;
   curveTokenAccount: string;
   freezeAuthority: string | null;
+  holderAccountCount: number;
+  holderSource:
+    | "classic_largest_accounts"
+    | "helius_program_accounts_v2"
+    | "program_accounts";
   largestNonCurveAmount: bigint;
   mintAuthority: string | null;
   mintOwner: string;
   totalSupply: bigint;
+}
+
+interface HolderSnapshot {
+  accountCount: number;
+  contextSlot: number;
+  creatorAmount: bigint;
+  largestNonCurveAmount: bigint;
+  source: OnChainSnapshot["holderSource"];
+}
+
+interface SlicedTokenAccount {
+  amount: bigint;
+  owner: PublicKey;
+  pubkey: PublicKey;
+}
+
+interface TokenAccountScan {
+  accounts: SlicedTokenAccount[];
+  contextSlot: number;
+  source: "helius_program_accounts_v2" | "program_accounts";
 }
 
 interface RugcheckSnapshot {
@@ -174,6 +199,8 @@ export class SolanaRiskProvider implements RiskProvider {
         creatorHolderPct,
         curveOwner: onChain.curveOwner,
         curveTokenAccount: onChain.curveTokenAccount,
+        holderAccountCount: onChain.holderAccountCount,
+        holderSource: onChain.holderSource,
         largestNonCurveAmount: onChain.largestNonCurveAmount.toString(),
         mintOwner: onChain.mintOwner,
         topNonCurveHolderPct: topHolderPct,
@@ -217,7 +244,13 @@ export class SolanaRiskProvider implements RiskProvider {
     const mintKey = new PublicKey(state.mint);
     const curveKey = bondingCurvePda(mintKey);
     const tokenProgram = new PublicKey(state.tokenProgram);
-    const [accounts, largest, creatorAccounts] = await Promise.all([
+    const curveTokenAccount = getAssociatedTokenAddressSync(
+      mintKey,
+      curveKey,
+      true,
+      tokenProgram,
+    );
+    const [accounts, holders] = await Promise.all([
       retryReadiness(
         async () =>
           await this.connection.getMultipleAccountsInfoAndContext(
@@ -228,6 +261,52 @@ export class SolanaRiskProvider implements RiskProvider {
         policy,
         "mint or bonding curve account is not ready",
       ),
+      tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
+        ? this.token2022HolderSnapshot(
+            state,
+            mintKey,
+            curveKey,
+            curveTokenAccount,
+            policy,
+          )
+        : this.classicHolderSnapshot(
+            state,
+            mintKey,
+            curveKey,
+            curveTokenAccount,
+            tokenProgram,
+            policy,
+          ),
+    ]);
+    const mintInfo = accounts.value[0];
+    const curveInfo = accounts.value[1];
+    if (!mintInfo || !curveInfo)
+      throw new Error("mint or bonding curve account is not ready");
+    const mint = unpackMint(mintKey, mintInfo, mintInfo.owner);
+    return {
+      contextSlot: Math.min(accounts.context.slot, holders.contextSlot),
+      creatorAmount: holders.creatorAmount,
+      curveOwner: curveInfo.owner.toBase58(),
+      curveTokenAccount: curveTokenAccount.toBase58(),
+      freezeAuthority: mint.freezeAuthority?.toBase58() ?? null,
+      holderAccountCount: holders.accountCount,
+      holderSource: holders.source,
+      largestNonCurveAmount: holders.largestNonCurveAmount,
+      mintAuthority: mint.mintAuthority?.toBase58() ?? null,
+      mintOwner: mintInfo.owner.toBase58(),
+      totalSupply: mint.supply,
+    };
+  }
+
+  private async classicHolderSnapshot(
+    state: MintState,
+    mintKey: PublicKey,
+    curveKey: PublicKey,
+    curveTokenAccount: PublicKey,
+    tokenProgram: PublicKey,
+    policy: PolicyConfig,
+  ): Promise<HolderSnapshot> {
+    const [largest, creatorAccounts] = await Promise.all([
       retryReadiness(
         async () =>
           await this.connection.getTokenLargestAccounts(mintKey, "processed"),
@@ -247,22 +326,10 @@ export class SolanaRiskProvider implements RiskProvider {
         "creator token accounts are not ready",
       ),
     ]);
-    const mintInfo = accounts.value[0];
-    const curveInfo = accounts.value[1];
-    if (!mintInfo || !curveInfo)
-      throw new Error("mint or bonding curve account is not ready");
-    const mint = unpackMint(mintKey, mintInfo, mintInfo.owner);
-    const curveTokenAccount = getAssociatedTokenAddressSync(
-      mintKey,
-      curveKey,
-      true,
-      mintInfo.owner,
-    ).toBase58();
     const largestNonCurveAmount = largest.value
       .filter(
         ({ address }) =>
-          address.toBase58() !== curveTokenAccount &&
-          address.toBase58() !== curveKey.toBase58(),
+          !address.equals(curveTokenAccount) && !address.equals(curveKey),
       )
       .reduce(
         (maximum, account) =>
@@ -279,19 +346,191 @@ export class SolanaRiskProvider implements RiskProvider {
       0n,
     );
     return {
-      contextSlot: Math.min(
-        accounts.context.slot,
-        creatorAccounts.context.slot,
-      ),
+      accountCount: largest.value.length,
+      contextSlot: Math.min(largest.context.slot, creatorAccounts.context.slot),
       creatorAmount,
-      curveOwner: curveInfo.owner.toBase58(),
-      curveTokenAccount,
-      freezeAuthority: mint.freezeAuthority?.toBase58() ?? null,
       largestNonCurveAmount,
-      mintAuthority: mint.mintAuthority?.toBase58() ?? null,
-      mintOwner: mintInfo.owner.toBase58(),
-      totalSupply: mint.supply,
+      source: "classic_largest_accounts",
     };
+  }
+
+  private async token2022HolderSnapshot(
+    state: MintState,
+    mintKey: PublicKey,
+    curveKey: PublicKey,
+    curveTokenAccount: PublicKey,
+    policy: PolicyConfig,
+  ): Promise<HolderSnapshot> {
+    const scan = await retryReadiness(
+      async () => await this.scanToken2022Accounts(mintKey, state.lastSlot),
+      (value) => value.accounts.length > 0,
+      policy,
+      "Token-2022 accounts are not ready",
+    );
+    let creatorAmount = 0n;
+    let largestNonCurveAmount = 0n;
+    const creator = new PublicKey(state.creator);
+    for (const account of scan.accounts) {
+      if (account.owner.equals(creator)) creatorAmount += account.amount;
+      if (
+        !account.pubkey.equals(curveTokenAccount) &&
+        !account.pubkey.equals(curveKey) &&
+        account.amount > largestNonCurveAmount
+      )
+        largestNonCurveAmount = account.amount;
+    }
+    return {
+      accountCount: scan.accounts.length,
+      contextSlot: scan.contextSlot,
+      creatorAmount,
+      largestNonCurveAmount,
+      source: scan.source,
+    };
+  }
+
+  private async scanToken2022Accounts(
+    mintKey: PublicKey,
+    minContextSlot: number,
+  ): Promise<TokenAccountScan> {
+    if (isHeliusEndpoint(this.connection.rpcEndpoint))
+      return await scanHeliusToken2022Accounts(
+        this.connection,
+        mintKey,
+        minContextSlot,
+      );
+    const response = await this.connection.getProgramAccounts(
+      TOKEN_2022_PROGRAM_ID,
+      {
+        commitment: "processed",
+        dataSlice: { length: 40, offset: 32 },
+        filters: [{ memcmp: { bytes: mintKey.toBase58(), offset: 0 } }],
+        minContextSlot,
+        withContext: true,
+      },
+    );
+    return {
+      accounts: response.value.map(({ account, pubkey }) =>
+        decodeTokenAccountSlice(pubkey, account.data),
+      ),
+      contextSlot: response.context.slot,
+      source: "program_accounts",
+    };
+  }
+}
+
+const TOKEN_ACCOUNT_SLICE_OFFSET = 32;
+const TOKEN_ACCOUNT_SLICE_LENGTH = 40;
+const HELIUS_PAGE_LIMIT = 10_000;
+
+interface RawRpcConnection {
+  _rpcRequest(method: string, args: unknown[]): Promise<unknown>;
+}
+
+async function scanHeliusToken2022Accounts(
+  connection: Connection,
+  mintKey: PublicKey,
+  minContextSlot: number,
+): Promise<TokenAccountScan> {
+  const rpc = connection as unknown as RawRpcConnection;
+  const raw = await rpc._rpcRequest("getProgramAccountsV2", [
+    TOKEN_2022_PROGRAM_ID.toBase58(),
+    {
+      commitment: "processed",
+      dataSlice: {
+        length: TOKEN_ACCOUNT_SLICE_LENGTH,
+        offset: TOKEN_ACCOUNT_SLICE_OFFSET,
+      },
+      encoding: "base64",
+      filters: [{ memcmp: { bytes: mintKey.toBase58(), offset: 0 } }],
+      limit: HELIUS_PAGE_LIMIT,
+      minContextSlot,
+      withContext: true,
+    },
+  ]);
+  const parsed = parseHeliusProgramAccountsPage(raw);
+  if (parsed.paginationKey)
+    throw new Error(
+      `Token-2022 account scan exceeded ${HELIUS_PAGE_LIMIT} accounts; a consistent single-slot holder snapshot is unavailable`,
+    );
+  return {
+    accounts: parsed.accounts,
+    contextSlot: parsed.contextSlot,
+    source: "helius_program_accounts_v2",
+  };
+}
+
+function parseHeliusProgramAccountsPage(raw: unknown): {
+  accounts: SlicedTokenAccount[];
+  contextSlot: number;
+  paginationKey: string | null;
+} {
+  if (!isRecord(raw)) throw new Error("invalid getProgramAccountsV2 response");
+  if (isRecord(raw.error))
+    throw new Error(
+      `getProgramAccountsV2 failed: ${String(raw.error.message ?? "unknown error")}`,
+    );
+  const result = raw.result;
+  if (!isRecord(result) || !isRecord(result.context) || !isRecord(result.value))
+    throw new Error("invalid getProgramAccountsV2 result");
+  const slot = result.context.slot;
+  const rows = result.value.accounts;
+  const cursor = result.value.paginationKey;
+  if (
+    typeof slot !== "number" ||
+    !Number.isSafeInteger(slot) ||
+    !Array.isArray(rows) ||
+    !(cursor === null || typeof cursor === "string")
+  )
+    throw new Error("invalid getProgramAccountsV2 page");
+  return {
+    accounts: rows.map((row) => {
+      if (
+        !isRecord(row) ||
+        typeof row.pubkey !== "string" ||
+        !isRecord(row.account)
+      )
+        throw new Error("invalid getProgramAccountsV2 account");
+      const encoded = row.account.data;
+      if (
+        !Array.isArray(encoded) ||
+        typeof encoded[0] !== "string" ||
+        encoded[1] !== "base64"
+      )
+        throw new Error("invalid getProgramAccountsV2 account data");
+      return decodeTokenAccountSlice(
+        new PublicKey(row.pubkey),
+        Buffer.from(encoded[0], "base64"),
+      );
+    }),
+    contextSlot: slot,
+    paginationKey: cursor,
+  };
+}
+
+function decodeTokenAccountSlice(
+  pubkey: PublicKey,
+  data: Buffer,
+): SlicedTokenAccount {
+  if (data.length !== TOKEN_ACCOUNT_SLICE_LENGTH)
+    throw new Error(
+      `invalid Token-2022 account slice length ${data.length}; expected ${TOKEN_ACCOUNT_SLICE_LENGTH}`,
+    );
+  return {
+    amount: data.readBigUInt64LE(32),
+    owner: new PublicKey(data.subarray(0, 32)),
+    pubkey,
+  };
+}
+
+function isHeliusEndpoint(endpoint: unknown): boolean {
+  if (typeof endpoint !== "string") return false;
+  try {
+    const hostname = new URL(endpoint).hostname.toLowerCase();
+    return (
+      hostname === "helius-rpc.com" || hostname.endsWith(".helius-rpc.com")
+    );
+  } catch {
+    return false;
   }
 }
 

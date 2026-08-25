@@ -84,7 +84,7 @@ Restart with `DESK_MODE=shadow`, then verify the dashboard and [`/api/health`](h
 
 - The event stream stays healthy and receives fresh slots.
 - The price oracle stays healthy.
-- Real candidate risk reports complete successfully, including `getTokenLargestAccounts`; no required field is `unknown`.
+- Real candidate risk reports complete successfully: classic SPL Token mints use `getTokenLargestAccounts`, while Token-2022 mints use a mint-filtered account scan; no required field is `unknown`.
 - There are no recurring RPC `403`, `429`, timeout, or WebSocket disconnect errors.
 - Risk checks finish inside the configured deadline under normal candidate load.
 - The engine remains fail-closed when the RPC is deliberately made unavailable.
@@ -98,12 +98,13 @@ Every Solana HTTP call made through web3.js uses one process-wide rolling limite
 The deterministic HTTP schedule is:
 
 - idle: one `getSlot` health probe per minute, about 43,200 standard calls in a 30-day month;
-- each exact mint that reaches Risk: normally three concurrent RPC calls, at most nine if the mint/index is not ready and both bounded retries are used;
-- each open position: the same three-call risk snapshot every 15 seconds, at most 144 calls during the 12-minute maximum hold;
+- each exact classic SPL mint that reaches Risk: normally three concurrent standard RPC calls, at most nine if the mint/index is not ready and both bounded retries are used;
+- each exact Token-2022 mint that reaches Risk on Helius: normally two calls (one batched mint/curve read plus one `getProgramAccountsV2` holder scan), at most six with both bounded retries; more than 10,000 token accounts fails closed because multiple pages cannot provide one consistent holder snapshot;
+- each open position: the matching classic or Token-2022 snapshot every 15 seconds; a normal Token-2022 position therefore uses at most 96 calls during the 12-minute maximum hold;
 - startup/recovery: one signature-list call plus up to 100 transaction reads only when a durable checkpoint exists;
 - live execution: simulation, send, confirmation, parsed-transaction reconciliation, and any address-lookup-table reads.
 
-Rugcheck's two HTTP requests per risk snapshot do not consume Helius credits. Helius currently documents [1 credit for standard RPC calls and 1M monthly credits on Free](https://www.helius.dev/docs/billing/credits); verify the provider dashboard because plan terms can change. `SOLANA_RPC_MAX_RPS` controls rate, not the monthly total.
+Rugcheck's two HTTP requests per risk snapshot do not consume Helius credits. Helius currently documents [1 credit for `getProgramAccountsV2`, 10 for standard `getProgramAccounts`, 1 for other standard RPC calls, and 1M monthly credits on Free](https://www.helius.dev/docs/billing/credits); verify the provider dashboard because plan terms can change. A non-Helius endpoint falls back to standard `getProgramAccounts` for Token-2022 compatibility, which may have different provider cost and latency. `SOLANA_RPC_MAX_RPS` controls rate, not the monthly total.
 
 ## Execution modes
 

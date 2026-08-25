@@ -16,8 +16,8 @@ Do this in order:
 1. In the existing solid-octo-engine checkout, record the current public commit and public expected signer address without displaying any secret. Preserve .env, the SQLite ledger, and the existing keypair file. Pull main with fast-forward only.
 2. Activate Node 24 from .nvmrc. Run npm ci, npm run format:check, npm run check, npm run build, and both fixture replays. Stop on any failure; do not start live.
 3. Set DESK_MODE=shadow without printing .env. On macOS, install/update the supplied launchd plist using the absolute Node 24 binary and repo path. Ensure .env and the keypair remain mode 0600. Find the owner of port 8787 and stop only a verified old Solid Octo process/job. Load exactly one com.solid-octo-engine job. Do not also run npm start.
-4. Observe http://127.0.0.1:8787/api/health, /api/snapshot, the ledger, and service logs. Confirm fresh slot heartbeats, healthy price sources, RPC max 8 RPS, queue recovery to zero, no recent 429, no recurring parser/catch-up exception, exact-mint terminality, and bounded event growth. Confirm Anchor CreateEvent and TradeEvent are producing candidates.
-5. Keep shadow running for at least 30 minutes and until at least 10 unique exact-mint Risk runs complete, whichever is longer. Require zero duplicate buy intents, zero process crashes, zero EADDRINUSE, no recurring 403/429/timeouts, and no unknown caused by malformed parsing. Risk policy kills are valid outcomes; infrastructure errors are not.
+4. Observe http://127.0.0.1:8787/api/health, /api/snapshot, the ledger, and service logs. Confirm fresh slot heartbeats, healthy price sources, RPC max 8 RPS, queue recovery to zero, no recent 429, no recurring parser/catch-up exception, exact-mint terminality, and bounded event growth. Confirm Anchor CreateEvent and TradeEvent are producing candidates. For Token-2022 candidates, require holderSource=helius_program_accounts_v2, a positive holderAccountCount, getProgramAccountsV2 in RPC telemetry, and no getTokenLargestAccounts call for that mint.
+5. Keep shadow running for at least 30 minutes and until at least 10 unique exact-mint Risk runs complete, whichever is longer. Given the current Pump stream, require at least 10 completed Token-2022 Risk runs specifically. Require zero duplicate buy intents, zero process crashes, zero EADDRINUSE, no recurring 403/429/timeouts, no "not a Token mint" error, and no unknown caused by malformed parsing. Risk policy kills are valid outcomes; infrastructure errors are not.
 6. Produce a concise shadow report with counts and p50/p95 event-to-risk, Risk latency, RPC calls by method, 429 count, unique mints, terminal kills by reason, paper intents/fills, and any open paper positions. Clearly separate facts from hypotheses. Do not claim alpha or profitability.
 7. If and only if the shadow gate passes, disarm, set DESK_MODE=live without printing .env, restart the same single service, and verify the public expected signer equals the already-funded isolated address. Confirm live startup automatically disarmed and /api/health is BLOCKED until all readiness reasons clear.
 8. Let live-disarmed observation run. A passing Risk report may make readiness current, but that exact candidate must be recorded as passed_unarmed_kill and must not be remade. When /api/health reports readiness.canArm=true, stop and ask the human for exactly one action: open the local dashboard and arm a short lease personally. Do not ask for or handle the token.
@@ -28,8 +28,8 @@ STATUS: SHADOW_VALIDATING | LIVE_BLOCKED | READY_FOR_HUMAN_ARM | KILLED
 COMMIT: public SHA
 PROCESS: one PID/service or NOT OK
 HEALTH: readiness plus component states
-RPC: total/by-method/queue/429 and observation window
-RISK: unique runs/pass/policy-kill/infrastructure-error and p50/p95 latency
+RPC: total/by-method including getProgramAccountsV2/queue/429 and observation window
+RISK: unique runs split classic/Token-2022, pass/policy-kill/infrastructure-error, holder source/count, and p50/p95 latency
 EXECUTION: intents/submitted/confirmed/reconciled, exact signatures only if public
 POSITIONS: current-mode/current-wallet only
 NEXT: one bounded permitted action

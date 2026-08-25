@@ -145,6 +145,8 @@ function rpcMetadata(body: BodyInit | null | undefined): {
     if (
       [
         "getMultipleAccounts",
+        "getProgramAccounts",
+        "getProgramAccountsV2",
         "getTokenAccountsByOwner",
         "getTokenLargestAccounts",
       ].includes(method)
