@@ -9,13 +9,21 @@ import { buildExecutor } from "./execution/executors.js";
 import { PumpApiTransactionBuilder } from "./execution/pump-builder.js";
 import { SolanaRiskProvider } from "./risk/solana-risk.js";
 import { Ledger } from "./storage/ledger.js";
+import { RpcRateController } from "./rpc/rate-controller.js";
 
 const config = loadConfig();
-const ledger = new Ledger(config.dbPath);
+const ledger = new Ledger(
+  config.dbPath,
+  config.eventRetentionMs,
+  config.eventMaxRows,
+);
 const control = new ControlPlane(ledger, config.policy, config.armToken);
+const rpc = new RpcRateController(config.rpcMaxRequestsPerSecond);
 const connection = new Connection(config.rpcHttpUrl, {
   commitment: "processed",
   confirmTransactionInitialTimeout: 10_000,
+  disableRetryOnRateLimit: true,
+  fetch: rpc.fetch,
   wsEndpoint: config.rpcWsUrl,
 });
 const prices = new MedianSolPriceOracle();
@@ -31,18 +39,20 @@ const executor = buildExecutor({
 });
 
 let lastSlotAtMs = 0;
+let engine: MintDeskEngine;
 const source = new AnchorPumpEventSource(
   connection,
   (slot, atMs) => {
     lastSlotAtMs = atMs;
     engine.health.heartbeat("eventStream", `slot ${slot}`, atMs);
   },
+  (error, sourceName) => engine.markSourceDegraded(error, sourceName),
   {
     get: () => ledger.getControl<string | null>("pumpCheckpoint", null),
     set: (signature) => ledger.setControl("pumpCheckpoint", signature),
   },
 );
-const engine = new MintDeskEngine(
+engine = new MintDeskEngine(
   config.mode,
   config.policy,
   ledger,
@@ -52,6 +62,7 @@ const engine = new MintDeskEngine(
   risk,
   executor,
   connection,
+  rpc,
 );
 const app = await createServer(config, engine);
 await app.listen({ host: config.host, port: config.port });
@@ -65,7 +76,9 @@ const watchdog = setInterval(() => {
       "no slot heartbeat for 15 seconds",
     );
     if (config.mode === "live")
-      void engine.engageKillSwitch("event_stream_stale");
+      void engine
+        .engageKillSwitch("event_stream_stale")
+        .catch((error) => engine.markSourceDegraded(error, "watchdog_kill"));
   }
 }, 5_000);
 

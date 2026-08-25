@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  DeskMode,
   DeskEvent,
   ExecutionResult,
   MintState,
@@ -12,8 +13,13 @@ import type {
 
 export class Ledger {
   private readonly db: DatabaseSync;
+  private writesSincePrune = 0;
 
-  constructor(path: string) {
+  constructor(
+    path: string,
+    private readonly retentionMs = 24 * 60 * 60 * 1_000,
+    private readonly maxEvents = 50_000,
+  ) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec(
@@ -38,6 +44,11 @@ export class Ledger {
         event.type,
         JSON.stringify(event.data),
       );
+    this.writesSincePrune += 1;
+    if (this.writesSincePrune >= 500) {
+      this.pruneOperationalData(event.atMs);
+      this.writesSincePrune = 0;
+    }
   }
 
   recentEvents(limit = 100): DeskEvent[] {
@@ -98,6 +109,28 @@ export class Ledger {
         report.passed ? 1 : 0,
         JSON.stringify(report),
       );
+  }
+
+  latestRiskReport(): RiskReport | null {
+    const row = this.db
+      .prepare(
+        "SELECT report_json FROM risk_reports ORDER BY checked_at_ms DESC LIMIT 1",
+      )
+      .get() as { report_json?: string } | undefined;
+    return row?.report_json
+      ? (JSON.parse(row.report_json) as RiskReport)
+      : null;
+  }
+
+  latestPassingRiskReport(): RiskReport | null {
+    const row = this.db
+      .prepare(
+        "SELECT report_json FROM risk_reports WHERE passed = 1 ORDER BY checked_at_ms DESC LIMIT 1",
+      )
+      .get() as { report_json?: string } | undefined;
+    return row?.report_json
+      ? (JSON.parse(row.report_json) as RiskReport)
+      : null;
   }
 
   createIntent(intent: OrderIntent): boolean {
@@ -219,12 +252,19 @@ export class Ledger {
     return rows.map((row) => JSON.parse(row.position_json) as Position);
   }
 
-  dailySpendUsdCents(sinceMs: number): number {
+  dailySpendUsdCents(sinceMs: number, mode: DeskMode, wallet: string): number {
     const rows = this.db
       .prepare(
-        "SELECT intent_json FROM order_intents WHERE side = 'buy' AND created_at_ms >= ? AND status IN ('submitted','confirmed','paper_filled')",
+        `SELECT i.intent_json
+         FROM order_intents i
+         JOIN executions e ON e.intent_id = i.id
+         WHERE i.side = 'buy'
+           AND i.created_at_ms >= ?
+           AND i.status IN ('submitted','confirmed','paper_filled')
+           AND json_extract(i.intent_json, '$.wallet') = ?
+           AND json_extract(e.result_json, '$.mode') = ?`,
       )
-      .all(sinceMs) as Array<{ intent_json: string }>;
+      .all(sinceMs, wallet, mode) as Array<{ intent_json: string }>;
     return rows.reduce(
       (sum, row) =>
         sum + (JSON.parse(row.intent_json) as OrderIntent).spendUsdCents!,
@@ -248,6 +288,41 @@ export class Ledger {
       .prepare("SELECT value_json FROM control_state WHERE key = ?")
       .get(key) as { value_json?: string } | undefined;
     return row?.value_json ? (JSON.parse(row.value_json) as T) : fallback;
+  }
+
+  pruneOperationalData(nowMs = Date.now()): void {
+    const cutoffMs = nowMs - this.retentionMs;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM desk_events WHERE at_ms < ?").run(cutoffMs);
+      this.db
+        .prepare(
+          `DELETE FROM desk_events WHERE id IN (
+            SELECT id FROM desk_events ORDER BY at_ms DESC LIMIT -1 OFFSET ?
+          )`,
+        )
+        .run(this.maxEvents);
+      this.db
+        .prepare(
+          `DELETE FROM mints
+           WHERE updated_at_ms < ? AND phase IN ('seen', 'killed', 'closed')`,
+        )
+        .run(cutoffMs);
+      this.db
+        .prepare(
+          `DELETE FROM risk_reports
+           WHERE checked_at_ms < ?
+             AND raw_hash NOT IN (
+               SELECT json_extract(intent_json, '$.riskSnapshotHash')
+               FROM order_intents
+             )`,
+        )
+        .run(cutoffMs);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private migrate(): void {

@@ -247,6 +247,12 @@ button:hover {
   border-color: #516072;
   color: #fff;
 }
+
+button:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.7);
+  opacity: 0.45;
+}
 button.primary {
   background: #154630;
   border-color: #287b56;

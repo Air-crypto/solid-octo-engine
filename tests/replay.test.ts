@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { Connection } from "@solana/web3.js";
-import { describe, expect, it } from "vitest";
+import { Connection, Keypair } from "@solana/web3.js";
+import { describe, expect, it, vi } from "vitest";
 import { ReplayPumpEventSource } from "../src/adapters/pump-events.js";
 import { StaticPriceOracle } from "../src/adapters/price-oracle.js";
 import { ControlPlane } from "../src/core/control.js";
@@ -9,6 +9,7 @@ import { stableHash } from "../src/core/hash.js";
 import type { PumpEvent, RiskReport } from "../src/domain/types.js";
 import { ShadowExecutor } from "../src/execution/executors.js";
 import type { RiskProvider } from "../src/risk/types.js";
+import { RpcRateController } from "../src/rpc/rate-controller.js";
 import { policy, tempLedger } from "./helpers.js";
 
 describe("VSEXY replay", () => {
@@ -23,6 +24,7 @@ describe("VSEXY replay", () => {
         return {
           checkedAtMs: nowMs,
           checks: [{ detail: "fixture", name: "all", status: "pass" }],
+          evidence: { onChain: {}, rugcheck: {} },
           mint: state.mint,
           passed: true,
           rawHash: stableHash(state.mint),
@@ -52,6 +54,7 @@ describe("VSEXY replay", () => {
         () => 1_000_500,
       ),
       new Connection("http://127.0.0.1:8899"),
+      new RpcRateController(100),
     );
     await engine.start();
     const snapshot = engine.snapshot();
@@ -84,6 +87,7 @@ describe("QUEEZING remints", () => {
         return {
           checkedAtMs: nowMs,
           checks: [{ detail: "fixture", name: "all", status: "fail" }],
+          evidence: { onChain: {}, rugcheck: {} },
           mint: state.mint,
           passed: false,
           rawHash: stableHash(state.mint),
@@ -109,12 +113,132 @@ describe("QUEEZING remints", () => {
       risk,
       new ShadowExecutor("ReplayWallet11111111111111111111111111111111"),
       new Connection("http://127.0.0.1:8899"),
+      new RpcRateController(100),
     );
     await engine.start();
     expect(
       new Set(engine.snapshot().candidates.map((candidate) => candidate.mint))
         .size,
     ).toBe(2);
+    await engine.stop();
+    ledger.close();
+  });
+});
+
+describe("terminal exact-mint risk", () => {
+  it("does not re-run Risk when a killed mint crosses again", async () => {
+    const fixture = JSON.parse(
+      readFileSync("fixtures/vsexy-replay.json", "utf8"),
+    ) as { events: PumpEvent[]; solUsd: number };
+    const create = fixture.events[0]!;
+    const crossing = fixture.events[1]!;
+    if (create.kind !== "create" || crossing.kind !== "trade")
+      throw new Error("unexpected fixture");
+    const dip = {
+      ...crossing,
+      observedAtMs: crossing.observedAtMs + 100,
+      signature: "vsexy-dip-signature",
+      slot: crossing.slot + 1,
+      virtualSolReservesLamports: create.virtualSolReservesLamports,
+    };
+    const recross = {
+      ...crossing,
+      observedAtMs: crossing.observedAtMs + 200,
+      signature: "vsexy-recross-signature",
+      slot: crossing.slot + 2,
+    };
+    const assess = vi.fn(
+      async (state, _policy, nowMs = Date.now()): Promise<RiskReport> => ({
+        checkedAtMs: nowMs,
+        checks: [{ detail: "fixture", name: "all", status: "fail" }],
+        evidence: { onChain: {}, rugcheck: {} },
+        mint: state.mint,
+        passed: false,
+        rawHash: stableHash(state.mint),
+        sourceLatencyMs: {},
+        tokenProgram: state.tokenProgram,
+      }),
+    );
+    const ledger = tempLedger();
+    const engine = new MintDeskEngine(
+      "shadow",
+      policy,
+      ledger,
+      new ControlPlane(ledger, policy),
+      new ReplayPumpEventSource([create, crossing, dip, recross]),
+      new StaticPriceOracle({
+        priceUsd: fixture.solUsd,
+        sources: [
+          { name: "a", priceUsd: fixture.solUsd },
+          { name: "b", priceUsd: fixture.solUsd },
+        ],
+        spreadPct: 0,
+      }),
+      { assess },
+      new ShadowExecutor("ReplayWallet11111111111111111111111111111111"),
+      new Connection("http://127.0.0.1:8899"),
+      new RpcRateController(100),
+    );
+    await engine.start();
+    expect(assess).toHaveBeenCalledTimes(1);
+    expect(engine.snapshot().candidates[0]?.phase).toBe("killed");
+    await engine.stop();
+    ledger.close();
+  });
+});
+
+describe("live readiness", () => {
+  it("runs risk while disarmed, kills that candidate, then permits a later arm", async () => {
+    const fixture = JSON.parse(
+      readFileSync("fixtures/vsexy-replay.json", "utf8"),
+    ) as { events: PumpEvent[]; solUsd: number };
+    const ledger = tempLedger();
+    const armToken = "this-is-a-long-test-arm-token";
+    const control = new ControlPlane(ledger, policy, armToken);
+    const wallet = Keypair.generate().publicKey.toBase58();
+    const risk: RiskProvider = {
+      async assess(state): Promise<RiskReport> {
+        return {
+          checkedAtMs: Date.now(),
+          checks: [{ detail: "fixture", name: "all", status: "pass" }],
+          evidence: { onChain: {}, rugcheck: {} },
+          mint: state.mint,
+          passed: true,
+          rawHash: stableHash(state.mint),
+          sourceLatencyMs: {},
+          tokenProgram: state.tokenProgram,
+        };
+      },
+    };
+    const connection = {
+      getBalance: vi.fn(async () => 100_000_000),
+      getSlot: vi.fn(async () => 123),
+    } as unknown as Connection;
+    const engine = new MintDeskEngine(
+      "live",
+      policy,
+      ledger,
+      control,
+      new ReplayPumpEventSource(fixture.events),
+      new StaticPriceOracle({
+        priceUsd: fixture.solUsd,
+        sources: [
+          { name: "a", priceUsd: fixture.solUsd },
+          { name: "b", priceUsd: fixture.solUsd },
+        ],
+        spreadPct: 0,
+      }),
+      risk,
+      new ShadowExecutor(wallet),
+      connection,
+      new RpcRateController(100),
+    );
+    await engine.start();
+    const snapshot = engine.snapshot();
+    expect(snapshot.positions).toHaveLength(0);
+    expect(snapshot.candidates[0]?.phase).toBe("killed");
+    expect(snapshot.readiness).toEqual({ canArm: true, reasons: [] });
+    expect(engine.arm(armToken, 60_000)).toBeGreaterThan(Date.now());
     await engine.stop();
     ledger.close();
   });

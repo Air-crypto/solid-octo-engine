@@ -4,7 +4,7 @@
 flowchart TB
   subgraph Observe
     WS[Pump WebSocket events]
-    BF[10s signature catch-up]
+    BF[Startup / slot-gap catch-up]
     PX[Median SOL/USD oracle]
   end
   subgraph Decide
@@ -57,7 +57,7 @@ Name and symbol do not participate in identity. `one_buy_per_mint_idx` makes a s
 
 Before Pump graduation there is no conventional AMM LP position to lock; liquidity is held by the canonical Pump bonding-curve program. Therefore the early-launch deterministic equivalent is an exact canonical bonding-curve PDA and owner check. Rugcheck remains a required independent availability/insider source by default. After graduation this version does not open a new position, because the requested entry window is pre-graduation.
 
-Risk inputs are hashed into the order intent. `unknown` is not a soft warning: any required unknown makes `passed=false`. Open positions are rechecked every 15 seconds; a failure, error, or timeout engages the kill switch and requests a full exit.
+Risk inputs and bounded raw evidence are hashed into the order intent. `unknown` is not a soft warning: any required unknown makes `passed=false`. The normal on-chain snapshot uses three concurrent calls: a batched mint/curve account read, largest token accounts, and creator-owned token accounts. It retries only fresh-index readiness errors, twice by default. Rugcheck summary and insider-network endpoints run concurrently with the on-chain snapshot. Only one entry or position risk snapshot owns the gate at a time. Open positions are rechecked every 15 seconds; a failure, error, or timeout engages the kill switch and requests a full exit.
 
 ## Execution invariants
 
@@ -86,4 +86,4 @@ The SQLite record is the source of truth. Failed exit submission returns the pos
 
 ## Recovery behavior
 
-Candidate state, the event checkpoint, controls, intents, executions, and positions survive restart. The live event source installs listeners before catch-up, replays up to 100 Pump signatures newer than the durable checkpoint, and relies on signature/slot deduplication to absorb overlap. If the slot heartbeat is absent for 15 seconds, health is marked down and live mode engages the kill switch.
+Candidate state, the event checkpoint, controls, intents, executions, and positions survive restart. Interrupted nonterminal candidates become terminal kills on restart. The live event source installs one log listener before catch-up, replays up to 100 Pump signatures newer than the durable checkpoint, ignores failed transactions, and preserves the newest live checkpoint even if older catch-up work is slower. Events are serialized per mint so asynchronous oracle/risk work cannot reorder one mint's state. If the slot heartbeat is absent for 15 seconds, health is marked down and live mode engages the kill switch.

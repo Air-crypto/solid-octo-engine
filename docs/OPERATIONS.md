@@ -26,6 +26,8 @@ Start the service and inspect:
 
 Do not run the service on a laptop expected to sleep. Use systemd/container restart policy and an external heartbeat if continuous observation matters.
 
+Run exactly one process. `EADDRINUSE` means another engine or old dashboard already owns port 8787; it is not a reason to change ports and accidentally run two desks. Resolve the owning PID and working directory, stop only the known old service, and then let one service manager restart it. Never run `npm start` manually while the launchd/systemd unit is loaded.
+
 ## 3. Manual Phantom mode
 
 Set:
@@ -65,14 +67,14 @@ Startup fails if the keypair file is group/world-readable, its derived address d
 
 ## 5. Arming and kill switch
 
-The dashboard arm action requires the token and requests a lease no longer than `armLeaseMaxMs`. The default maximum is 15 minutes. The token is checked with a timing-safe comparison and is not stored in the database.
+The dashboard arm action requires the token and requests a lease no longer than `armLeaseMaxMs`. The default maximum is 15 minutes, and the engine further caps it at the remaining freshness of the last passing risk report. The token is checked with a timing-safe comparison and is not stored in the database.
 
 - `Disarm` prevents new live buys after the current synchronous action finishes.
-- `KILL` immediately engages the persisted kill switch and asks the exit engine to close open positions on their next evaluation/recheck.
+- `KILL` immediately engages the persisted kill switch and runs the exit path for open positions belonging to the current mode and wallet.
 - Releasing the kill switch requires the arm token; it does not automatically arm buys.
 - Sells do not require an arm lease.
 
-Test all four controls in shadow and manual mode before live funding.
+Live always starts disarmed. While disarmed, eligible exact mints may run Risk so the readiness gate can become current, but that candidate is terminally killed after Risk and is never remade. Only a later candidate can buy after the human arms the desk. Test all four controls before live funding.
 
 ## 6. Promotion criteria
 
@@ -93,3 +95,5 @@ Keep the live daily cap and wallet balance small. A passing gate only bounds mec
 Stop the service before copying the SQLite database, or copy the database together with its `-wal` and `-shm` files. Reconcile ledger positions to RPC token balances and transaction signatures. Never use the dashboard alone as proof of a fill.
 
 After a test window, disarm, close/reconcile positions, and sweep unused SOL back to a safer wallet on a trusted device.
+
+Operational events are capped by `DESK_EVENT_MAX_ROWS` and `DESK_EVENT_RETENTION_HOURS`. After upgrading an old high-volume database, stop the service, make a consistent backup, and optionally run `sqlite3 data/desk.db 'VACUUM;'` once to return already-allocated pages to disk. Do not run `VACUUM` against a live writer. Rotate launchd stdout/stderr separately; SQLite retention does not rotate text logs.

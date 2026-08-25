@@ -16,6 +16,8 @@ const optionalArmToken = z.preprocess(
 const envSchema = z.object({
   DESK_ARM_TOKEN: optionalArmToken,
   DESK_DB_PATH: z.string().default("./data/desk.db"),
+  DESK_EVENT_MAX_ROWS: z.coerce.number().int().min(1_000).default(50_000),
+  DESK_EVENT_RETENTION_HOURS: z.coerce.number().positive().default(24),
   DESK_HOST: z.string().default("127.0.0.1"),
   DESK_MODE: z.enum(["shadow", "manual", "live"]).default("shadow"),
   DESK_POLICY_PATH: z.string().default("./config/policy.json"),
@@ -27,6 +29,7 @@ const envSchema = z.object({
     .string()
     .url()
     .default("https://api.mainnet-beta.solana.com"),
+  SOLANA_RPC_MAX_RPS: z.coerce.number().int().min(1).max(500).default(8),
   SOLANA_RPC_WS_URL: z
     .string()
     .url()
@@ -44,6 +47,7 @@ const policySchema = z.object({
   maxOpenPositions: z.number().int().positive(),
   maxOracleSpreadPct: z.number().positive(),
   maxPriceAgeMs: z.number().int().positive(),
+  minRugcheckLpLockedPct: z.number().min(0).max(100),
   maxSlippageBps: z.number().int().min(1).max(10_000),
   maxSpendUsdCents: z.number().int().positive(),
   maxTopHolderPct: z.number().min(0).max(100),
@@ -53,6 +57,9 @@ const policySchema = z.object({
   requireMintAuthorityRevoked: z.boolean(),
   requireOfficialBondingCurve: z.boolean(),
   requireRugcheck: z.boolean(),
+  riskFailureKillThreshold: z.number().int().positive(),
+  riskReadinessRetries: z.number().int().min(0).max(10),
+  riskReadinessRetryDelayMs: z.number().int().positive(),
   riskTimeoutMs: z.number().int().positive(),
   spikeCeilingMarketCapUsd: z.number().positive(),
   takeProfitPct: z.number().positive(),
@@ -65,6 +72,8 @@ const policySchema = z.object({
 export interface AppConfig {
   armToken?: string;
   dbPath: string;
+  eventMaxRows: number;
+  eventRetentionMs: number;
   executionKeypairPath?: string;
   expectedSignerPublicKey?: string;
   host: string;
@@ -72,6 +81,7 @@ export interface AppConfig {
   policy: PolicyConfig;
   port: number;
   rpcHttpUrl: string;
+  rpcMaxRequestsPerSecond: number;
   rpcWsUrl: string;
   rugcheckBaseUrl: string;
 }
@@ -121,6 +131,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     armToken: parsed.DESK_ARM_TOKEN,
     dbPath: resolve(parsed.DESK_DB_PATH),
+    eventMaxRows: parsed.DESK_EVENT_MAX_ROWS,
+    eventRetentionMs: parsed.DESK_EVENT_RETENTION_HOURS * 60 * 60 * 1_000,
     executionKeypairPath: parsed.SOLANA_EXECUTION_KEYPAIR_PATH
       ? resolve(parsed.SOLANA_EXECUTION_KEYPAIR_PATH)
       : undefined,
@@ -130,6 +142,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     policy,
     port: parsed.DESK_PORT,
     rpcHttpUrl: parsed.SOLANA_RPC_HTTP_URL,
+    rpcMaxRequestsPerSecond: parsed.SOLANA_RPC_MAX_RPS,
     rpcWsUrl: parsed.SOLANA_RPC_WS_URL,
     rugcheckBaseUrl: parsed.RUGCHECK_BASE_URL,
   };

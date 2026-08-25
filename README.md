@@ -26,13 +26,13 @@ flowchart LR
 
 ## What is deterministic
 
-- Native Pump `createEvent` and `tradeEvent` subscriptions, slot heartbeat, durable checkpoint, and bounded catch-up.
+- One native Pump log subscription, case-correct Anchor `CreateEvent`/`TradeEvent` parsing, per-mint ordering, slot heartbeat, a monotonic durable checkpoint, and catch-up only at startup or after a slot gap.
 - Exact mint identity. Names and symbols are display-only, so same-name remints remain separate candidates.
 - Bonding-curve market-cap computation and a strict crossing rule: below `$3,200` on the previous event, at or above it now, age at most 30 seconds, and high-water market cap still below `$4,000`.
 - Median SOL/USD mark with staleness, source-count, and spread gates. Dexscreener is not in the entry path.
-- On-chain mint/freeze authority, token program, canonical Pump curve owner/PDA, holder concentration, creator holdings, Rugcheck availability, and insiders. Any required unknown is a kill.
+- On-chain mint/freeze authority, token program, canonical Pump curve owner/PDA, curve-excluded holder concentration, creator holdings, Rugcheck LP-lock percentage, and insider networks. Any required unknown is a kill.
 - One immutable buy intent per mint, short intent expiry, bounded spend, daily cap, position cap, wallet binding, risk/policy hashes, transaction simulation, and program allowlisting.
-- Durable SQLite ledger in WAL/FULL mode for candidates, risk reports, intents, executions, positions, control state, and the event stream.
+- Durable SQLite ledger in WAL/FULL mode for candidates, risk reports, intents, executions, positions, and control state. High-volume operational events are retained for 24 hours and capped at 50,000 rows by default.
 - Exit state machine: sell half at `+40%`, trail the remainder by `20%`, close at 12 minutes, and allow emergency exits even while new buys are disarmed.
 
 ## Quick start
@@ -91,6 +91,20 @@ Restart with `DESK_MODE=shadow`, then verify the dashboard and [`/api/health`](h
 
 If public-RPC errors disappear but the private endpoint still rate-limits or misses the risk deadline, raise the provider capacity or choose a lower-latency plan/region. Do not bypass holder checks, increase risk, or relax the fail-closed policy merely to make the health indicator pass.
 
+### Helius request budget
+
+Every Solana HTTP call made through web3.js uses one process-wide rolling limiter. The default is `8` requests/second, below Helius Free's current `10` RPS limit. Web3's automatic 429 retry loop is disabled; a recent 429, a large queue, or unhealthy RPC blocks arming. The dashboard and `/api/health` expose total calls, calls by method, queue depth, failures, 429 count, and last-429 time.
+
+The deterministic HTTP schedule is:
+
+- idle: one `getSlot` health probe per minute, about 43,200 standard calls in a 30-day month;
+- each exact mint that reaches Risk: normally three concurrent RPC calls, at most nine if the mint/index is not ready and both bounded retries are used;
+- each open position: the same three-call risk snapshot every 15 seconds, at most 144 calls during the 12-minute maximum hold;
+- startup/recovery: one signature-list call plus up to 100 transaction reads only when a durable checkpoint exists;
+- live execution: simulation, send, confirmation, parsed-transaction reconciliation, and any address-lookup-table reads.
+
+Rugcheck's two HTTP requests per risk snapshot do not consume Helius credits. Helius currently documents [1 credit for standard RPC calls and 1M monthly credits on Free](https://www.helius.dev/docs/billing/credits); verify the provider dashboard because plan terms can change. `SOLANA_RPC_MAX_RPS` controls rate, not the monthly total.
+
 ## Execution modes
 
 | Mode     | Signer                                    |                               Can spend SOL? | Intended use                                      |
@@ -129,6 +143,8 @@ All prompts inherit [`bots/COMMON_BOUNDARIES.md`](bots/COMMON_BOUNDARIES.md): no
 - `deploy/` — container and systemd examples
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [SECURITY.md](SECURITY.md), and [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) before live use.
+
+For a single-instance macOS service and the exact shadow-to-live handoff, see [deploy/README.md](deploy/README.md) and [docs/CHIEF_GROK_RUNBOOK.md](docs/CHIEF_GROK_RUNBOOK.md).
 
 ## Live-readiness gate
 

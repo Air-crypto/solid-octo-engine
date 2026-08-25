@@ -24,11 +24,16 @@ export async function createServer(config: AppConfig, engine: MintDeskEngine) {
     policy: config.policy,
   }));
   app.get("/api/snapshot", async () => engine.snapshot());
-  app.get("/api/health", async () => ({
-    control: engine.control.snapshot(),
-    health: engine.health.snapshot(),
-    mode: engine.mode,
-  }));
+  app.get("/api/health", async () => {
+    const snapshot = engine.snapshot();
+    return {
+      control: engine.control.snapshot(),
+      health: snapshot.health,
+      mode: snapshot.mode,
+      readiness: snapshot.readiness,
+      rpc: snapshot.rpc,
+    };
+  });
   app.get("/api/manual/pending", async () => {
     if (engine.mode !== "manual") return [];
     return engine.ledger.pendingManualExecutions();
@@ -61,7 +66,7 @@ export async function createServer(config: AppConfig, engine: MintDeskEngine) {
   app.post("/api/control/arm", async (request, reply) => {
     try {
       const body = armSchema.parse(request.body);
-      return { armedUntilMs: engine.control.arm(body.token, body.leaseMs) };
+      return { armedUntilMs: engine.arm(body.token, body.leaseMs) };
     } catch (error) {
       return reply.code(403).send({
         error: error instanceof Error ? error.message : String(error),

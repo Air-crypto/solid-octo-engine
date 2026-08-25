@@ -145,6 +145,10 @@ export function App() {
   if (!snapshot || !config) return <main className="loading">{message}</main>;
   const armed =
     snapshot.armedUntilMs !== null && snapshot.armedUntilMs > Date.now();
+  const ready = snapshot.readiness.canArm;
+  const recentRpcLimit =
+    snapshot.rpc.last429AtMs !== null &&
+    Date.now() - snapshot.rpc.last429AtMs < 60_000;
 
   return (
     <main>
@@ -156,8 +160,17 @@ export function App() {
         <div className="status-strip">
           <Status
             label="MODE"
-            value={snapshot.mode.toUpperCase()}
+            value={
+              snapshot.mode === "live" && !ready
+                ? "LIVE / BLOCKED"
+                : snapshot.mode.toUpperCase()
+            }
             tone={snapshot.mode === "live" ? "danger" : "safe"}
+          />
+          <Status
+            label="READY"
+            value={ready ? "YES" : "NO"}
+            tone={ready ? "safe" : "warn"}
           />
           <Status
             label="LEASE"
@@ -205,6 +218,7 @@ export function App() {
           <div className="button-row">
             <button
               className="primary"
+              disabled={!ready}
               onClick={() =>
                 void post("/api/control/arm", {
                   leaseMs: 15 * 60_000,
@@ -243,6 +257,11 @@ export function App() {
             Wallet passwords and recovery phrases are never accepted by this
             application.
           </p>
+          {!ready && (
+            <p className="note">
+              Arm blocked: {snapshot.readiness.reasons.join(" · ")}
+            </p>
+          )}
         </article>
 
         <article className="panel health">
@@ -257,6 +276,15 @@ export function App() {
               <span>{health.detail}</span>
             </div>
           ))}
+          <div className="health-row">
+            <span className={`dot ${recentRpcLimit ? "degraded" : "ok"}`} />
+            <strong>RPC meter</strong>
+            <span>
+              {snapshot.rpc.total} calls · {snapshot.rpc.queueDepth} queued ·{" "}
+              {snapshot.rpc.rateLimited} rate-limited · cap{" "}
+              {snapshot.rpc.maxRequestsPerSecond}/s
+            </span>
+          </div>
         </article>
       </section>
 
@@ -358,7 +386,7 @@ export function App() {
       <section className="panel feed">
         <div className="panel-heading">
           <h2>Audit stream</h2>
-          <span>Durable, append-only events</span>
+          <span>Durable, bounded operational events</span>
         </div>
         {events
           .slice(-30)

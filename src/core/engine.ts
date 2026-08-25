@@ -1,4 +1,4 @@
-import type { Connection } from "@solana/web3.js";
+import { PublicKey, type Connection } from "@solana/web3.js";
 import type {
   DeskMode,
   DeskSnapshot,
@@ -10,6 +10,7 @@ import type {
   PumpEvent,
   RiskReport,
 } from "../domain/types.js";
+import type { RpcRateController } from "../rpc/rate-controller.js";
 import type { PriceOracle } from "../adapters/price-oracle.js";
 import type { PumpEventSource } from "../adapters/pump-events.js";
 import type { RiskProvider } from "../risk/types.js";
@@ -31,7 +32,12 @@ export class MintDeskEngine {
   readonly candidates: CandidateStore;
   readonly health = new HealthRegistry();
   private readonly processing = new Set<string>();
+  private readonly eventChains = new Map<string, Promise<void>>();
+  private consecutiveRiskFailures = 0;
+  private lastPassingRiskAtMs: number | null = null;
+  private rpcHealthTimer: NodeJS.Timeout | null = null;
   private monitorTimer: NodeJS.Timeout | null = null;
+  private riskBusy = false;
   private started = false;
 
   constructor(
@@ -44,12 +50,14 @@ export class MintDeskEngine {
     private readonly risk: RiskProvider,
     private readonly executor: Executor,
     private readonly connection: Connection,
+    private readonly rpc: RpcRateController,
   ) {
     this.bus = new DeskEventBus(ledger);
     this.candidates = new CandidateStore(ledger);
     this.health.set("eventStream", "down", "not started");
     this.health.set("priceOracle", "down", "not checked");
     this.health.set("risk", "down", "not checked");
+    this.health.set("rpc", "down", "not checked");
     this.health.set(
       "execution",
       mode === "shadow" ? "disabled" : "down",
@@ -60,10 +68,19 @@ export class MintDeskEngine {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    if (this.mode !== "shadow") this.control.disarm();
+    await this.preflightInfrastructure();
     await this.source.start((event) => this.handleEvent(event));
     this.monitorTimer = setInterval(
-      () => void this.monitorOpenPositions(),
+      () =>
+        void this.monitorOpenPositions().catch((error) =>
+          this.handleBackgroundFailure("position_monitor", error),
+        ),
       15_000,
+    );
+    this.rpcHealthTimer = setInterval(
+      () => void this.refreshRpcHealth(),
+      60_000,
     );
     this.health.heartbeat("eventStream", "Pump Anchor subscriptions active");
     this.bus.emit("system", "engine.started", {
@@ -75,14 +92,31 @@ export class MintDeskEngine {
   async stop(): Promise<void> {
     if (!this.started) return;
     await this.source.stop();
+    await Promise.allSettled([...this.eventChains.values()]);
     if (this.monitorTimer) clearInterval(this.monitorTimer);
+    if (this.rpcHealthTimer) clearInterval(this.rpcHealthTimer);
     this.monitorTimer = null;
+    this.rpcHealthTimer = null;
     this.started = false;
     this.health.set("eventStream", "down", "stopped");
     this.bus.emit("system", "engine.stopped", {});
   }
 
   async handleEvent(event: PumpEvent): Promise<void> {
+    const previous = this.eventChains.get(event.mint) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(async () => await this.processEvent(event));
+    this.eventChains.set(event.mint, current);
+    try {
+      await current;
+    } finally {
+      if (this.eventChains.get(event.mint) === current)
+        this.eventChains.delete(event.mint);
+    }
+  }
+
+  private async processEvent(event: PumpEvent): Promise<void> {
     let mark;
     try {
       mark = await this.prices.getMark(event.observedAtMs);
@@ -103,15 +137,20 @@ export class MintDeskEngine {
 
     const state = this.candidates.apply(event, mark);
     if (!state) return;
-    this.bus.emit(
-      "scout",
-      event.kind === "create" ? "mint.created" : "mint.updated",
-      summarizeMint(state, event.observedAtMs),
-      event.observedAtMs,
-    );
+    if (event.kind === "create")
+      this.bus.emit(
+        "scout",
+        "mint.created",
+        summarizeMint(state, event.observedAtMs),
+        event.observedAtMs,
+      );
     await this.evaluateOpenPosition(state, event.observedAtMs);
 
-    if (this.ledger.hasBuyIntent(state.mint) || this.processing.has(state.mint))
+    if (
+      state.phase !== "seen" ||
+      this.ledger.hasBuyIntent(state.mint) ||
+      this.processing.has(state.mint)
+    )
       return;
     const decision = evaluateEntryPolicy(
       state,
@@ -120,15 +159,34 @@ export class MintDeskEngine {
       event.observedAtMs,
     );
     if (!decision.eligible) {
+      const ageMs = event.observedAtMs - state.createdAtMs;
+      if (
+        ageMs > this.policy.maxAgeMs ||
+        state.highWaterMarketCapUsd >= this.policy.spikeCeilingMarketCapUsd
+      ) {
+        this.candidates.setPhase(state.mint, "killed");
+        this.bus.emit(
+          "scout",
+          "candidate.policy_kill",
+          { mint: state.mint, reasons: decision.reasons },
+          event.observedAtMs,
+        );
+      }
+      return;
+    }
+
+    if (this.riskBusy) {
+      this.candidates.setPhase(state.mint, "killed");
       this.bus.emit(
-        "scout",
-        "candidate.filtered",
-        { mint: state.mint, reasons: decision.reasons },
+        "risk",
+        "risk.busy_kill",
+        { mint: state.mint, reason: "another exact mint owns the risk gate" },
         event.observedAtMs,
       );
       return;
     }
 
+    this.riskBusy = true;
     this.processing.add(state.mint);
     this.candidates.setPhase(state.mint, "risk_pending");
     this.bus.emit(
@@ -139,11 +197,13 @@ export class MintDeskEngine {
     );
     try {
       const report = await withTimeout(
-        this.risk.assess(state, this.policy, event.observedAtMs),
+        this.risk.assess(state, this.policy, Date.now()),
         this.policy.riskTimeoutMs,
         "risk assessment timed out",
       );
       this.ledger.saveRisk(report);
+      this.consecutiveRiskFailures = 0;
+      if (report.passed) this.lastPassingRiskAtMs = report.checkedAtMs;
       this.health.heartbeat(
         "risk",
         `last check ${report.passed ? "passed" : "failed"}`,
@@ -158,24 +218,67 @@ export class MintDeskEngine {
         this.candidates.setPhase(state.mint, "killed");
         return;
       }
+      if (this.mode === "live") {
+        const control = this.control.canExecute();
+        if (!control.allowed) {
+          this.candidates.setPhase(state.mint, "killed");
+          this.bus.emit(
+            "head",
+            "candidate.passed_unarmed_kill",
+            { mint: state.mint, reason: control.reason },
+            event.observedAtMs,
+          );
+          return;
+        }
+      }
       this.candidates.setPhase(state.mint, "ready");
       await this.createAndExecuteBuy(
         state,
         report,
         decision.snapshotHash,
         mark.priceUsd,
-        event.observedAtMs,
+        Date.now(),
       );
     } catch (error) {
+      this.consecutiveRiskFailures += 1;
       this.health.set("risk", "degraded", errorMessage(error));
       this.candidates.setPhase(state.mint, "killed");
       this.bus.emit("risk", "risk.error_kill", {
         mint: state.mint,
         reason: errorMessage(error),
       });
+      if (
+        this.mode === "live" &&
+        this.consecutiveRiskFailures >= this.policy.riskFailureKillThreshold
+      )
+        await this.engageKillSwitch("risk_health_degraded");
     } finally {
       this.processing.delete(state.mint);
+      this.riskBusy = false;
     }
+  }
+
+  arm(token: string, leaseMs: number): number {
+    const readiness = this.readiness();
+    if (!readiness.canArm)
+      throw new Error(`desk is not ready: ${readiness.reasons.join("; ")}`);
+    const riskFreshForMs = Math.max(
+      1,
+      this.lastPassingRiskAtMs! + 15 * 60_000 - Date.now(),
+    );
+    return this.control.arm(token, Math.min(leaseMs, riskFreshForMs));
+  }
+
+  markSourceDegraded(error: unknown, source: string): void {
+    const component =
+      source === "event_parser" || source === "pump_logs"
+        ? "eventStream"
+        : "rpc";
+    this.health.set(component, "degraded", `${source}: ${errorMessage(error)}`);
+    this.bus.emit("system", `${component}.degraded`, {
+      reason: errorMessage(error),
+      source,
+    });
   }
 
   async confirmManual(intentId: string, signature: string): Promise<Position> {
@@ -209,7 +312,9 @@ export class MintDeskEngine {
             .listPositions(true)
             .find(
               (item) =>
-                item.mint === intent.mint && item.wallet === intent.wallet,
+                item.mint === intent.mint &&
+                item.mode === this.mode &&
+                item.wallet === intent.wallet,
             )
         : undefined;
     if (intent.side === "sell" && !sellPosition)
@@ -257,6 +362,8 @@ export class MintDeskEngine {
       killSwitch: control.killSwitch,
       mode: this.mode,
       positions: this.ledger.listPositions(false),
+      readiness: this.readiness(),
+      rpc: this.rpc.snapshot(),
     };
   }
 
@@ -265,7 +372,12 @@ export class MintDeskEngine {
     this.bus.emit("head", "control.kill_switch", { engaged: true, reason });
     for (const position of this.ledger
       .listPositions(true)
-      .filter((item) => item.status === "open")) {
+      .filter(
+        (item) =>
+          item.status === "open" &&
+          item.mode === this.mode &&
+          item.wallet === this.executor.wallet,
+      )) {
       const state = this.candidates.get(position.mint);
       if (!state) {
         this.bus.emit("exit", "exit.state_missing", {
@@ -286,12 +398,22 @@ export class MintDeskEngine {
     solUsd: number,
     nowMs: number,
   ): Promise<void> {
-    const openPositions = this.ledger.listPositions(true);
+    const openPositions = this.ledger
+      .listPositions(true)
+      .filter(
+        (position) =>
+          position.mode === this.mode &&
+          position.wallet === this.executor.wallet,
+      );
     if (openPositions.length >= this.policy.maxOpenPositions)
       throw new Error("maximum open positions reached");
     const dayStart = new Date(nowMs);
     dayStart.setUTCHours(0, 0, 0, 0);
-    const dailySpend = this.ledger.dailySpendUsdCents(dayStart.getTime());
+    const dailySpend = this.ledger.dailySpendUsdCents(
+      dayStart.getTime(),
+      this.mode,
+      this.executor.wallet,
+    );
     if (
       dailySpend + this.policy.defaultSpendUsdCents >
       this.policy.maxDailySpendUsdCents
@@ -346,6 +468,8 @@ export class MintDeskEngine {
         mint: intent.mint,
         reason: errorMessage(error),
       });
+      if (this.mode === "live")
+        await this.engageKillSwitch("execution_health_degraded");
     }
   }
 
@@ -383,7 +507,13 @@ export class MintDeskEngine {
   ): Promise<void> {
     const position = this.ledger
       .listPositions(true)
-      .find((item) => item.mint === state.mint && item.status === "open");
+      .find(
+        (item) =>
+          item.mint === state.mint &&
+          item.status === "open" &&
+          item.mode === this.mode &&
+          item.wallet === this.executor.wallet,
+      );
     if (!position) return;
     position.highWaterMarketCapUsd = Math.max(
       position.highWaterMarketCapUsd,
@@ -472,7 +602,12 @@ export class MintDeskEngine {
   private async monitorOpenPositions(): Promise<void> {
     for (const position of this.ledger
       .listPositions(true)
-      .filter((item) => item.status === "open")) {
+      .filter(
+        (item) =>
+          item.status === "open" &&
+          item.mode === this.mode &&
+          item.wallet === this.executor.wallet,
+      )) {
       const state = this.candidates.get(position.mint);
       if (!state) {
         await this.engageKillSwitch("position_state_missing");
@@ -482,6 +617,14 @@ export class MintDeskEngine {
         });
         continue;
       }
+      if (this.riskBusy) {
+        this.bus.emitTransient("rug", "monitor.risk_deferred", {
+          mint: position.mint,
+          reason: "entry risk gate is busy",
+        });
+        continue;
+      }
+      this.riskBusy = true;
       try {
         const report = await withTimeout(
           this.risk.assess(state, this.policy),
@@ -503,8 +646,99 @@ export class MintDeskEngine {
           reason: errorMessage(error),
         });
         await this.engageKillSwitch("position_risk_error");
+      } finally {
+        this.riskBusy = false;
       }
     }
+  }
+
+  private async preflightInfrastructure(): Promise<void> {
+    await this.refreshRpcHealth();
+
+    const latestRisk = this.ledger.latestRiskReport();
+    if (latestRisk && Date.now() - latestRisk.checkedAtMs <= 15 * 60_000)
+      this.health.heartbeat(
+        "risk",
+        `recent completed check ${latestRisk.passed ? "passed" : "killed"}`,
+        latestRisk.checkedAtMs,
+      );
+    const latestPassingRisk = this.ledger.latestPassingRiskReport();
+    if (latestPassingRisk)
+      this.lastPassingRiskAtMs = latestPassingRisk.checkedAtMs;
+
+    if (this.mode === "shadow") return;
+    if (this.mode === "manual") {
+      this.health.set(
+        "execution",
+        "degraded",
+        "Phantom must connect and match the configured wallet",
+      );
+      return;
+    }
+    try {
+      const balance = await this.connection.getBalance(
+        new PublicKey(this.executor.wallet),
+        "processed",
+      );
+      if (balance < 5_000_000)
+        throw new Error("execution wallet has less than 0.005 SOL");
+      this.health.heartbeat(
+        "execution",
+        `local signer verified; ${(balance / 1_000_000_000).toFixed(4)} SOL`,
+      );
+    } catch (error) {
+      this.health.set("execution", "down", errorMessage(error));
+    }
+  }
+
+  private async refreshRpcHealth(): Promise<void> {
+    try {
+      const slot = await this.connection.getSlot("processed");
+      this.health.heartbeat("rpc", `processed slot ${slot}`);
+    } catch (error) {
+      this.health.set("rpc", "degraded", errorMessage(error));
+    }
+  }
+
+  private handleBackgroundFailure(source: string, error: unknown): void {
+    this.health.set("risk", "degraded", `${source}: ${errorMessage(error)}`);
+    this.bus.emit("system", "background.error", {
+      reason: errorMessage(error),
+      source,
+    });
+    if (this.mode === "live") this.control.engageKillSwitch();
+  }
+
+  private readiness(): DeskSnapshot["readiness"] {
+    const reasons: string[] = [];
+    const health = this.health.snapshot();
+    const control = this.control.snapshot();
+    const rpc = this.rpc.snapshot();
+    if (this.mode !== "live")
+      reasons.push(`${this.mode} mode cannot arm live buys`);
+    for (const component of [
+      "eventStream",
+      "priceOracle",
+      "rpc",
+      "risk",
+      "execution",
+    ]) {
+      if (health[component]?.status !== "ok")
+        reasons.push(
+          `${component} is ${health[component]?.status ?? "missing"}`,
+        );
+    }
+    if (control.killSwitch) reasons.push("kill switch is engaged");
+    if (
+      !this.lastPassingRiskAtMs ||
+      Date.now() - this.lastPassingRiskAtMs > 15 * 60_000
+    )
+      reasons.push("no passing risk report in the last 15 minutes");
+    if (rpc.last429AtMs && Date.now() - rpc.last429AtMs < 60_000)
+      reasons.push("RPC rate limit was hit within the last 60 seconds");
+    if (rpc.queueDepth > rpc.maxRequestsPerSecond * 2)
+      reasons.push("RPC queue is backlogged");
+    return { canArm: reasons.length === 0, reasons };
   }
 }
 
@@ -519,6 +753,7 @@ function syntheticExitRisk(state: MintState): RiskReport {
         status: "pass",
       },
     ],
+    evidence: { onChain: {}, rugcheck: {} },
     mint: state.mint,
     passed: true,
     rawHash,

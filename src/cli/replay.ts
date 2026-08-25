@@ -12,6 +12,7 @@ import { stableHash } from "../core/hash.js";
 import type { PumpEvent, RiskReport } from "../domain/types.js";
 import { ShadowExecutor } from "../execution/executors.js";
 import type { RiskProvider } from "../risk/types.js";
+import { RpcRateController } from "../rpc/rate-controller.js";
 import { Ledger } from "../storage/ledger.js";
 
 interface ReplayFile {
@@ -52,6 +53,7 @@ const risk: RiskProvider = {
           status: passed ? "pass" : "fail",
         },
       ],
+      evidence: { onChain: {}, rugcheck: {} },
       mint: state.mint,
       passed,
       rawHash: stableHash({ mint: state.mint, passed }),
@@ -79,6 +81,7 @@ const engine = new MintDeskEngine(
   risk,
   executor,
   connection,
+  new RpcRateController(100),
 );
 await engine.start();
 process.stdout.write(`${JSON.stringify(engine.snapshot(), null, 2)}\n`);

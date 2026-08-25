@@ -92,6 +92,7 @@ export interface PolicyConfig {
   maxOpenPositions: number;
   maxOracleSpreadPct: number;
   maxPriceAgeMs: number;
+  minRugcheckLpLockedPct: number;
   maxSlippageBps: number;
   maxSpendUsdCents: number;
   maxTopHolderPct: number;
@@ -101,6 +102,9 @@ export interface PolicyConfig {
   requireMintAuthorityRevoked: boolean;
   requireOfficialBondingCurve: boolean;
   requireRugcheck: boolean;
+  riskFailureKillThreshold: number;
+  riskReadinessRetries: number;
+  riskReadinessRetryDelayMs: number;
   riskTimeoutMs: number;
   spikeCeilingMarketCapUsd: number;
   takeProfitPct: number;
@@ -127,6 +131,10 @@ export interface RiskCheck {
 export interface RiskReport {
   checkedAtMs: number;
   checks: RiskCheck[];
+  evidence: {
+    onChain: Record<string, unknown>;
+    rugcheck: Record<string, unknown>;
+  };
   mint: string;
   passed: boolean;
   rawHash: string;
@@ -213,6 +221,21 @@ export interface DeskSnapshot {
   killSwitch: boolean;
   mode: DeskMode;
   positions: Position[];
+  readiness: ReadinessSnapshot;
+  rpc: {
+    byMethod: Record<string, number>;
+    failed: number;
+    last429AtMs: number | null;
+    maxRequestsPerSecond: number;
+    queueDepth: number;
+    rateLimited: number;
+    total: number;
+  };
+}
+
+export interface ReadinessSnapshot {
+  canArm: boolean;
+  reasons: string[];
 }
 
 export interface ComponentHealth {

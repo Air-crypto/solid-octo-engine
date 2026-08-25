@@ -15,6 +15,7 @@ export const policy: PolicyConfig = {
   maxOpenPositions: 1,
   maxOracleSpreadPct: 1,
   maxPriceAgeMs: 5_000,
+  minRugcheckLpLockedPct: 100,
   maxSlippageBps: 500,
   maxSpendUsdCents: 1_200,
   maxTopHolderPct: 20,
@@ -24,6 +25,9 @@ export const policy: PolicyConfig = {
   requireMintAuthorityRevoked: true,
   requireOfficialBondingCurve: true,
   requireRugcheck: true,
+  riskFailureKillThreshold: 3,
+  riskReadinessRetries: 2,
+  riskReadinessRetryDelayMs: 75,
   riskTimeoutMs: 900,
   spikeCeilingMarketCapUsd: 4_000,
   takeProfitPct: 40,
@@ -33,8 +37,10 @@ export const policy: PolicyConfig = {
   version: 1,
 };
 
-export function tempLedger(): Ledger {
+export function tempLedger(retentionMs?: number, maxEvents?: number): Ledger {
   return new Ledger(
     join(mkdtempSync(join(tmpdir(), "solid-octo-test-")), "test.db"),
+    retentionMs,
+    maxEvents,
   );
 }

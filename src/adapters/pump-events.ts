@@ -1,6 +1,6 @@
-import type { Connection, PublicKey } from "@solana/web3.js";
+import type { Connection, Logs, PublicKey } from "@solana/web3.js";
 import { BorshCoder, EventParser } from "@coral-xyz/anchor";
-import { PUMP_PROGRAM_ID, getPumpProgram, pumpIdl } from "@pump-fun/pump-sdk";
+import { PUMP_PROGRAM_ID, pumpIdl } from "@pump-fun/pump-sdk";
 import type {
   PumpCreateEvent,
   PumpEvent,
@@ -15,77 +15,91 @@ export interface PumpEventSource {
 }
 
 export class AnchorPumpEventSource implements PumpEventSource {
-  private createListener: number | null = null;
-  private tradeListener: number | null = null;
+  private logsListener: number | null = null;
   private slotListener: number | null = null;
-  private catchupTimer: NodeJS.Timeout | null = null;
   private catchingUp = false;
-  private readonly program;
+  private liveGeneration = 0;
+  private lastSlotAtMs = 0;
+  private readonly parser = new EventParser(
+    PUMP_PROGRAM_ID,
+    new BorshCoder(pumpIdl as never),
+  );
 
   constructor(
     private readonly connection: Connection,
     private readonly onHeartbeat: (slot: number, atMs: number) => void = () =>
       undefined,
+    private readonly onError: (error: unknown, source: string) => void = () =>
+      undefined,
     private readonly checkpoint: {
       get(): string | null;
       set(signature: string): void;
     } = { get: () => null, set: () => undefined },
-  ) {
-    this.program = getPumpProgram(connection);
-  }
+  ) {}
 
   async start(handler: EventHandler): Promise<void> {
-    if (this.createListener !== null || this.tradeListener !== null)
+    if (this.logsListener !== null)
       throw new Error("Pump event source already started");
-    this.createListener = await this.program.addEventListener(
-      "createEvent",
-      async (event, slot, signature) => {
-        await handler(
-          toCreateEvent(
-            event as unknown as PumpCreateAnchorEvent,
-            slot,
-            signature,
-          ),
-        );
-        this.checkpoint.set(signature);
-      },
+    this.logsListener = this.connection.onLogs(
+      PUMP_PROGRAM_ID,
+      (logs, context) =>
+        void this.handleLogs(handler, logs, context.slot).catch((error) =>
+          this.onError(error, "pump_logs"),
+        ),
+      "processed",
     );
-    this.tradeListener = await this.program.addEventListener(
-      "tradeEvent",
-      async (event, slot, signature) => {
-        await handler(
-          toTradeEvent(
-            event as unknown as PumpTradeAnchorEvent,
-            slot,
-            signature,
-          ),
-        );
-        this.checkpoint.set(signature);
-      },
-    );
-    this.slotListener = this.connection.onSlotChange(({ slot }) =>
-      this.onHeartbeat(slot, Date.now()),
-    );
-    await this.catchUp(handler);
-    this.catchupTimer = setInterval(() => void this.catchUp(handler), 10_000);
+    this.slotListener = this.connection.onSlotChange(({ slot }) => {
+      const nowMs = Date.now();
+      const recoveredFromGap =
+        this.lastSlotAtMs > 0 && nowMs - this.lastSlotAtMs > 5_000;
+      this.lastSlotAtMs = nowMs;
+      this.onHeartbeat(slot, nowMs);
+      if (recoveredFromGap) void this.safeCatchUp(handler, "slot_gap");
+    });
+    await this.safeCatchUp(handler, "startup");
   }
 
   async stop(): Promise<void> {
     const removals: Promise<void>[] = [];
-    if (this.createListener !== null)
-      removals.push(this.program.removeEventListener(this.createListener));
-    if (this.tradeListener !== null)
-      removals.push(this.program.removeEventListener(this.tradeListener));
+    if (this.logsListener !== null)
+      removals.push(this.connection.removeOnLogsListener(this.logsListener));
     if (this.slotListener !== null)
       removals.push(
         this.connection.removeSlotChangeListener(this.slotListener),
       );
-    if (this.catchupTimer) clearInterval(this.catchupTimer);
     await Promise.allSettled(removals);
-    this.createListener = null;
-    this.tradeListener = null;
+    this.logsListener = null;
     this.slotListener = null;
-    this.catchupTimer = null;
+    this.lastSlotAtMs = 0;
+  }
+
+  private async handleLogs(
+    handler: EventHandler,
+    notification: Logs,
+    slot: number,
+  ): Promise<void> {
+    if (notification.err) return;
+    this.liveGeneration += 1;
+    // Persist receipt order before awaiting downstream work. A slow risk check
+    // must not let an older callback overwrite a newer live checkpoint.
+    this.checkpoint.set(notification.signature);
+    await this.parseAndHandle(
+      handler,
+      notification.logs,
+      slot,
+      notification.signature,
+    );
+  }
+
+  private async safeCatchUp(
+    handler: EventHandler,
+    source: string,
+  ): Promise<void> {
+    try {
+      await this.catchUp(handler);
+    } catch (error) {
+      this.onError(error, `catchup_${source}`);
+    }
   }
 
   private async catchUp(handler: EventHandler): Promise<void> {
@@ -93,47 +107,73 @@ export class AnchorPumpEventSource implements PumpEventSource {
     const until = this.checkpoint.get();
     if (!until) return;
     this.catchingUp = true;
+    const generationAtStart = this.liveGeneration;
     try {
       const signatures = await this.connection.getSignaturesForAddress(
         PUMP_PROGRAM_ID,
         { limit: 100, until },
         "confirmed",
       );
-      const parser = new EventParser(
-        PUMP_PROGRAM_ID,
-        new BorshCoder(pumpIdl as never),
-      );
+      let newestCatchUpSignature: string | null = null;
       for (const item of signatures.reverse()) {
         const transaction = await this.connection.getTransaction(
           item.signature,
           { commitment: "confirmed", maxSupportedTransactionVersion: 0 },
         );
-        if (!transaction?.meta?.logMessages) continue;
-        for (const parsed of parser.parseLogs(transaction.meta.logMessages)) {
-          if (parsed.name === "createEvent") {
-            await handler(
-              toCreateEvent(
-                parsed.data as unknown as PumpCreateAnchorEvent,
-                transaction.slot,
-                item.signature,
-              ),
-            );
-          } else if (parsed.name === "tradeEvent") {
-            await handler(
-              toTradeEvent(
-                parsed.data as unknown as PumpTradeAnchorEvent,
-                transaction.slot,
-                item.signature,
-              ),
-            );
-          }
-        }
-        this.checkpoint.set(item.signature);
+        if (transaction?.meta?.err || !transaction?.meta?.logMessages) continue;
+        await this.parseAndHandle(
+          handler,
+          transaction.meta.logMessages,
+          transaction.slot,
+          item.signature,
+        );
+        newestCatchUpSignature = item.signature;
       }
+      if (newestCatchUpSignature && this.liveGeneration === generationAtStart)
+        this.checkpoint.set(newestCatchUpSignature);
     } finally {
       this.catchingUp = false;
     }
   }
+
+  private async parseAndHandle(
+    handler: EventHandler,
+    logs: string[],
+    slot: number,
+    signature: string,
+  ): Promise<void> {
+    try {
+      for (const parsed of this.parser.parseLogs(logs)) {
+        const kind = pumpEventKind(parsed.name);
+        if (kind === "create") {
+          await handler(
+            toCreateEvent(
+              parsed.data as unknown as PumpCreateAnchorEvent,
+              slot,
+              signature,
+            ),
+          );
+        } else if (kind === "trade") {
+          await handler(
+            toTradeEvent(
+              parsed.data as unknown as PumpTradeAnchorEvent,
+              slot,
+              signature,
+            ),
+          );
+        }
+      }
+    } catch (error) {
+      this.onError(error, "event_parser");
+    }
+  }
+}
+
+export function pumpEventKind(name: string): "create" | "trade" | null {
+  const normalized = name.toLowerCase();
+  if (normalized === "createevent") return "create";
+  if (normalized === "tradeevent") return "trade";
+  return null;
 }
 
 export class ReplayPumpEventSource implements PumpEventSource {

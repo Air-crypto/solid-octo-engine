@@ -46,6 +46,16 @@ export interface Snapshot {
   killSwitch: boolean;
   mode: "shadow" | "manual" | "live";
   positions: Position[];
+  readiness: { canArm: boolean; reasons: string[] };
+  rpc: {
+    byMethod: Record<string, number>;
+    failed: number;
+    last429AtMs: number | null;
+    maxRequestsPerSecond: number;
+    queueDepth: number;
+    rateLimited: number;
+    total: number;
+  };
 }
 
 export interface PublicConfig {

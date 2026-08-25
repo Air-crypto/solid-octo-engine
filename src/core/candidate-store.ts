@@ -5,14 +5,22 @@ import type { Ledger } from "../storage/ledger.js";
 export class CandidateStore {
   private readonly states = new Map<string, MintState>();
 
-  constructor(private readonly ledger: Ledger) {
-    for (const state of ledger.listMints(10_000))
+  constructor(
+    private readonly ledger: Ledger,
+    private readonly maxStates = 10_000,
+  ) {
+    for (const state of ledger.listMints(maxStates)) {
+      if (["eligible", "risk_pending", "ready"].includes(state.phase)) {
+        state.phase = "killed";
+        ledger.upsertMint(state);
+      }
       this.states.set(state.mint, state);
+    }
   }
 
   apply(event: PumpEvent, price: PriceMark): MintState | null {
     if (event.kind === "create") {
-      const existing = this.states.get(event.mint);
+      const existing = this.load(event.mint);
       if (existing) return existing;
       const currentMarketCapUsd = bondingCurveMarketCapUsd({
         solUsd: price.priceUsd,
@@ -46,7 +54,7 @@ export class CandidateStore {
       return state;
     }
 
-    const state = this.states.get(event.mint);
+    const state = this.load(event.mint);
     if (
       !state ||
       event.slot < state.lastSlot ||
@@ -95,5 +103,29 @@ export class CandidateStore {
   private persist(state: MintState): void {
     this.states.set(state.mint, state);
     this.ledger.upsertMint(state);
+    this.trim();
+  }
+
+  private load(mint: string): MintState | null {
+    const state = this.states.get(mint) ?? this.ledger.getMint(mint);
+    if (state) this.states.set(mint, state);
+    return state;
+  }
+
+  private trim(): void {
+    if (this.states.size <= this.maxStates) return;
+    const removable = [...this.states.values()]
+      .filter(
+        (state) =>
+          state.phase === "killed" ||
+          state.phase === "closed" ||
+          (state.phase === "seen" &&
+            Date.now() - state.createdAtMs > 2 * 60_000),
+      )
+      .sort((a, b) => a.lastObservedAtMs - b.lastObservedAtMs);
+    for (const state of removable) {
+      if (this.states.size <= this.maxStates) break;
+      this.states.delete(state.mint);
+    }
   }
 }
