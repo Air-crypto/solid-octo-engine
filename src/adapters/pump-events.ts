@@ -1,4 +1,4 @@
-import type { Connection, Logs, PublicKey } from "@solana/web3.js";
+import type { Connection, Logs } from "@solana/web3.js";
 import { BorshCoder, EventParser } from "@coral-xyz/anchor";
 import { PUMP_PROGRAM_ID, pumpIdl } from "@pump-fun/pump-sdk";
 import type {
@@ -20,6 +20,8 @@ export class AnchorPumpEventSource implements PumpEventSource {
   private catchingUp = false;
   private liveGeneration = 0;
   private lastSlotAtMs = 0;
+  private lastParserErrorAtMs = 0;
+  private parserErrorsSinceReport = 0;
   private readonly parser = new EventParser(
     PUMP_PROGRAM_ID,
     new BorshCoder(pumpIdl as never),
@@ -142,30 +144,43 @@ export class AnchorPumpEventSource implements PumpEventSource {
     slot: number,
     signature: string,
   ): Promise<void> {
+    let parsedEvents: Array<{ data: unknown; name: string }>;
     try {
-      for (const parsed of this.parser.parseLogs(logs)) {
-        const kind = pumpEventKind(parsed.name);
-        if (kind === "create") {
-          await handler(
-            toCreateEvent(
-              parsed.data as unknown as PumpCreateAnchorEvent,
-              slot,
-              signature,
-            ),
-          );
-        } else if (kind === "trade") {
-          await handler(
-            toTradeEvent(
-              parsed.data as unknown as PumpTradeAnchorEvent,
-              slot,
-              signature,
-            ),
-          );
-        }
-      }
+      parsedEvents = [...this.parser.parseLogs(logs)];
     } catch (error) {
-      this.onError(error, "event_parser");
+      this.reportParserError(error, "log_envelope");
+      return;
     }
+    for (const parsed of parsedEvents) {
+      let event: PumpEvent | null = null;
+      try {
+        const kind = pumpEventKind(parsed.name);
+        if (kind === "create")
+          event = toCreateEvent(parsed.data, slot, signature);
+        else if (kind === "trade")
+          event = toTradeEvent(parsed.data, slot, signature);
+      } catch (error) {
+        this.reportParserError(error, parsed.name);
+        continue;
+      }
+      if (event) await handler(event);
+    }
+  }
+
+  private reportParserError(error: unknown, eventName: string): void {
+    this.parserErrorsSinceReport += 1;
+    const nowMs = Date.now();
+    if (nowMs - this.lastParserErrorAtMs < 60_000) return;
+    const count = this.parserErrorsSinceReport;
+    this.parserErrorsSinceReport = 0;
+    this.lastParserErrorAtMs = nowMs;
+    const detail = error instanceof Error ? error.message : String(error);
+    this.onError(
+      new Error(
+        `${eventName}: ${detail}; ${count} parser error(s) since report`,
+      ),
+      "event_parser",
+    );
   }
 }
 
@@ -206,88 +221,143 @@ export class ReplayPumpEventSource implements PumpEventSource {
   }
 }
 
-interface NumberLike {
-  toString(): string;
-}
-
-interface PumpCreateAnchorEvent {
-  bondingCurve: PublicKey;
-  creator: PublicKey;
-  isCashbackEnabled: boolean;
-  isMayhemMode: boolean;
-  mint: PublicKey;
-  name: string;
-  quoteMint: PublicKey;
-  symbol: string;
-  timestamp: NumberLike;
-  tokenProgram: PublicKey;
-  tokenTotalSupply: NumberLike;
-  uri: string;
-  virtualSolReserves: NumberLike;
-  virtualTokenReserves: NumberLike;
-}
-
-interface PumpTradeAnchorEvent {
-  creator: PublicKey;
-  isBuy: boolean;
-  mint: PublicKey;
-  quoteAmount: NumberLike;
-  solAmount: NumberLike;
-  timestamp: NumberLike;
-  tokenAmount: NumberLike;
-  user: PublicKey;
-  virtualSolReserves: NumberLike;
-  virtualTokenReserves: NumberLike;
-}
-
-function toCreateEvent(
-  event: PumpCreateAnchorEvent,
+export function toCreateEvent(
+  rawEvent: unknown,
   slot: number,
   signature: string,
 ): PumpCreateEvent {
+  const event = eventRecord(rawEvent, "CreateEvent");
   const now = Date.now();
   return {
-    blockTimeMs: Number(event.timestamp.toString()) * 1_000,
-    bondingCurve: event.bondingCurve.toBase58(),
-    creator: event.creator.toBase58(),
-    isCashbackEnabled: event.isCashbackEnabled,
-    isMayhemMode: event.isMayhemMode,
+    blockTimeMs: timestampMs(field(event, "timestamp")),
+    bondingCurve: base58(field(event, "bondingCurve", "bonding_curve")),
+    creator: base58(field(event, "creator")),
+    isCashbackEnabled: booleanField(
+      field(event, "isCashbackEnabled", "is_cashback_enabled"),
+    ),
+    isMayhemMode: booleanField(field(event, "isMayhemMode", "is_mayhem_mode")),
     kind: "create",
-    mint: event.mint.toBase58(),
-    name: event.name,
+    mint: base58(field(event, "mint")),
+    name: stringField(field(event, "name")),
     observedAtMs: now,
-    quoteMint: event.quoteMint.toBase58(),
+    quoteMint: base58(field(event, "quoteMint", "quote_mint")),
     signature,
     slot,
-    symbol: event.symbol,
-    tokenProgram: event.tokenProgram.toBase58(),
-    tokenTotalSupplyBaseUnits: event.tokenTotalSupply.toString(),
-    uri: event.uri,
-    virtualSolReservesLamports: event.virtualSolReserves.toString(),
-    virtualTokenReservesBaseUnits: event.virtualTokenReserves.toString(),
+    symbol: stringField(field(event, "symbol")),
+    tokenProgram: base58(field(event, "tokenProgram", "token_program")),
+    tokenTotalSupplyBaseUnits: integerString(
+      field(event, "tokenTotalSupply", "token_total_supply"),
+    ),
+    uri: stringField(field(event, "uri")),
+    virtualSolReservesLamports: integerString(
+      field(event, "virtualSolReserves", "virtual_sol_reserves"),
+    ),
+    virtualTokenReservesBaseUnits: integerString(
+      field(event, "virtualTokenReserves", "virtual_token_reserves"),
+    ),
   };
 }
 
-function toTradeEvent(
-  event: PumpTradeAnchorEvent,
+export function toTradeEvent(
+  rawEvent: unknown,
   slot: number,
   signature: string,
 ): PumpTradeEvent {
+  const event = eventRecord(rawEvent, "TradeEvent");
   const now = Date.now();
+  const solAmount = field(event, "solAmount", "sol_amount");
   return {
-    blockTimeMs: Number(event.timestamp.toString()) * 1_000,
-    creator: event.creator.toBase58(),
-    isBuy: event.isBuy,
+    blockTimeMs: timestampMs(field(event, "timestamp")),
+    creator: base58(field(event, "creator")),
+    isBuy: booleanField(field(event, "isBuy", "is_buy")),
     kind: "trade",
-    mint: event.mint.toBase58(),
+    mint: base58(field(event, "mint")),
     observedAtMs: now,
-    quoteAmountBaseUnits: event.quoteAmount.toString(),
+    quoteAmountBaseUnits: integerString(
+      optionalField(event, "quoteAmount", "quote_amount") ?? solAmount,
+    ),
     signature,
     slot,
-    solAmountLamports: event.solAmount.toString(),
-    tokenAmountBaseUnits: event.tokenAmount.toString(),
-    trader: event.user.toBase58(),
-    virtualSolReservesLamports: event.virtualSolReserves.toString(),
-    virtualTokenReservesBaseUnits: event.virtualTokenReserves.toString(),
+    solAmountLamports: integerString(solAmount),
+    tokenAmountBaseUnits: integerString(
+      field(event, "tokenAmount", "token_amount"),
+    ),
+    trader: base58(field(event, "user")),
+    virtualSolReservesLamports: integerString(
+      field(event, "virtualSolReserves", "virtual_sol_reserves"),
+    ),
+    virtualTokenReservesBaseUnits: integerString(
+      field(event, "virtualTokenReserves", "virtual_token_reserves"),
+    ),
   };
+}
+
+function eventRecord(value: unknown, name: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error(`${name} payload is not an object`);
+  return value as Record<string, unknown>;
+}
+
+function optionalField(
+  event: Record<string, unknown>,
+  camelName: string,
+  snakeName = camelName,
+): unknown {
+  return event[camelName] ?? event[snakeName];
+}
+
+function field(
+  event: Record<string, unknown>,
+  camelName: string,
+  snakeName = camelName,
+): unknown {
+  const value = optionalField(event, camelName, snakeName);
+  if (value == null) throw new Error(`event field ${snakeName} is missing`);
+  return value;
+}
+
+function base58(value: unknown): string {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "toBase58" in value &&
+    typeof value.toBase58 === "function"
+  )
+    return value.toBase58() as string;
+  throw new Error("event public key is malformed");
+}
+
+function integerString(value: unknown): string {
+  if (
+    typeof value === "bigint" ||
+    typeof value === "number" ||
+    typeof value === "string"
+  )
+    return String(value);
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "toString" in value &&
+    typeof value.toString === "function"
+  )
+    return value.toString();
+  throw new Error("event integer is malformed");
+}
+
+function timestampMs(value: unknown): number {
+  const timestamp = Number(integerString(value));
+  if (!Number.isSafeInteger(timestamp))
+    throw new Error("event timestamp is malformed");
+  return timestamp * 1_000;
+}
+
+function stringField(value: unknown): string {
+  if (typeof value !== "string") throw new Error("event string is malformed");
+  return value;
+}
+
+function booleanField(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error("event boolean is malformed");
+  return value;
 }
