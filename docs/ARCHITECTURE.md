@@ -64,7 +64,7 @@ Open positions are normally rechecked every 15 seconds with a separate three-sec
 ## Execution invariants
 
 - An intent is immutable, wallet-bound, mint-bound, policy-hash-bound, risk-hash-bound, and expires quickly.
-- A buy is impossible in live mode without a valid arm lease; a sell remains possible so the arm gate cannot trap an emergency exit.
+- A buy is impossible in any mode while KILL is engaged. Live buys additionally require a valid arm lease; a sell remains possible so neither gate can trap an emergency exit. Entry checks KILL before Risk and again after Risk to close the race window.
 - The transaction returned by the builder is untrusted input and is inspected before signing.
 - A live transaction is simulated with signature verification before broadcast.
 - Pump simulation errors `6002` (`TooMuchSolRequired`) and `6003` (`TooLittleSolReceived`) are pre-broadcast slippage rejections, not fills. A rejected buy is terminal for that exact candidate and disarms further buys, but does not require a process restart.
@@ -78,9 +78,9 @@ Open positions are normally rechecked every 15 seconds with a separate three-sec
 stateDiagram-v2
   [*] --> Open: confirmed or paper fill
   Open --> Open: update high-water
-  Open --> Closed: market cap <= entry * 0.85
-  Open --> Scaled: market cap >= entry * 1.40 / sell 50%
-  Scaled --> Closed: market cap <= high-water * 0.80
+  Open --> Closed: market cap <= entry * 0.95
+  Open --> Closed: market cap >= entry * 1.20
+  Scaled --> Closed: legacy partial <= high-water * 0.80
   Open --> Closed: age >= 12 minutes
   Scaled --> Closed: age >= 12 minutes
   Open --> Closed: kill switch or risk failure

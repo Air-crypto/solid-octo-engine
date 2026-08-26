@@ -24,6 +24,8 @@ Start the service and inspect:
 - the dashboard at `http://127.0.0.1:8787`;
 - SQLite and logs after sleep/wake, WebSocket interruption, rate limiting, and restart.
 
+KILL must be released by the human before a forward shadow run can create paper entries. With KILL engaged, eligible candidates are terminally recorded as `candidate.kill_switch_blocked` before Risk and create no intent, fill, position, or P&L. Releasing KILL does not arm live execution.
+
 Do not run the service on a laptop expected to sleep. Use systemd/container restart policy and an external heartbeat if continuous observation matters.
 
 Run exactly one process. `EADDRINUSE` means another engine or old dashboard already owns port 8787; it is not a reason to change ports and accidentally run two desks. Resolve the owning PID and working directory, stop only the known old service, and then let one service manager restart it. Never run `npm start` manually while the launchd/systemd unit is loaded.
@@ -71,6 +73,7 @@ The dashboard arm action requires the token and requests a lease no longer than 
 
 - `Disarm` prevents new live buys after the current synchronous action finishes.
 - `KILL` immediately engages the persisted kill switch and runs the exit path for open positions belonging to the current mode and wallet.
+- KILL blocks every new buy in shadow, manual, and live; it never blocks a sell.
 - Releasing the kill switch requires the arm token; it does not automatically arm buys.
 - Sells do not require an arm lease.
 
@@ -94,10 +97,10 @@ Require a time-bounded forward shadow report, not a successful synthetic replay.
 - price source availability/spread and RPC heartbeat gaps;
 - expected versus actual output and realized slippage in manual tests;
 - restart/catch-up behavior;
-- kill, initial loss-stop, half-take-profit, trailing-stop, and time-stop outcomes;
+- KILL entry blocking, KILL exit, full `-5%` loss-stop, full `+20%` take-profit, legacy-partial trailing-stop, and time-stop outcomes;
 - bounded pre-broadcast exit retry and no-retry-after-ambiguous-broadcast behavior.
 
-Keep the live daily cap and wallet balance small. A passing gate only bounds mechanism risk; it does not validate alpha.
+Keep the live daily cap and wallet balance small. Policy version 3 has independent limits: `maxDailyShadowSpendUsdCents` defaults to `$1,000,000` of paper spend, while `maxDailySpendUsdCents` stays `$50` for manual/live. Never copy the shadow value into the live field. A passing gate only bounds mechanism risk; it does not validate alpha.
 
 ## 7. Backup and reconciliation
 

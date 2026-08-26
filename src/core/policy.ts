@@ -1,10 +1,20 @@
 import type {
+  DeskMode,
   MintState,
   PolicyConfig,
   PolicyDecision,
   PriceMark,
 } from "../domain/types.js";
 import { stableHash } from "./hash.js";
+
+export function dailySpendCapUsdCents(
+  mode: DeskMode,
+  policy: PolicyConfig,
+): number {
+  return mode === "shadow"
+    ? policy.maxDailyShadowSpendUsdCents
+    : policy.maxDailySpendUsdCents;
+}
 
 export function evaluateEntryPolicy(
   state: MintState,

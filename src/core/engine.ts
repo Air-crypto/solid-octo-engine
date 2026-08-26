@@ -25,7 +25,7 @@ import { evaluateExit } from "./exit-policy.js";
 import { newId, stableHash } from "./hash.js";
 import { HealthRegistry } from "./health.js";
 import { usdCentsToLamports } from "./market-cap.js";
-import { evaluateEntryPolicy } from "./policy.js";
+import { dailySpendCapUsdCents, evaluateEntryPolicy } from "./policy.js";
 import {
   feeLamportsFromTransaction,
   nativeSolDeltaFromTransaction,
@@ -197,6 +197,8 @@ export class MintDeskEngine {
       return;
     }
 
+    if (this.blockEntryWhileKilled(state, event.observedAtMs)) return;
+
     if (this.riskBusy) {
       this.candidates.setPhase(state.mint, "killed");
       this.bus.emit(
@@ -240,6 +242,7 @@ export class MintDeskEngine {
         this.candidates.setPhase(state.mint, "killed");
         return;
       }
+      if (this.blockEntryWhileKilled(state, event.observedAtMs)) return;
       if (this.mode === "live") {
         const control = this.control.canExecute();
         if (!control.allowed) {
@@ -491,7 +494,7 @@ export class MintDeskEngine {
     );
     if (
       dailySpend + this.policy.defaultSpendUsdCents >
-      this.policy.maxDailySpendUsdCents
+      dailySpendCapUsdCents(this.mode, this.policy)
     )
       throw new Error("daily spend cap reached");
 
@@ -564,6 +567,21 @@ export class MintDeskEngine {
       if (this.mode === "live" && !candidateRejection)
         await this.engageKillSwitch("execution_health_degraded");
     }
+  }
+
+  private blockEntryWhileKilled(
+    state: MintState,
+    observedAtMs: number,
+  ): boolean {
+    if (!this.control.snapshot(observedAtMs).killSwitch) return false;
+    this.candidates.setPhase(state.mint, "killed");
+    this.bus.emit(
+      "head",
+      "candidate.kill_switch_blocked",
+      { mint: state.mint, reason: "kill switch engaged" },
+      observedAtMs,
+    );
+    return true;
   }
 
   private openPosition(

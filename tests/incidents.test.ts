@@ -139,6 +139,93 @@ async function monitor(engine: MintDeskEngine): Promise<void> {
 }
 
 describe("incident regressions", () => {
+  it("blocks shadow entries at KILL before Risk or intent creation", async () => {
+    const { create, crossing, solUsd } = fixture();
+    const assess = vi.fn(async (state: MintState) => report(state));
+    const executor = new IncidentExecutor(wallet, "shadow");
+    const ledger = tempLedger();
+    const control = new ControlPlane(ledger, policy);
+    control.engageKillSwitch();
+    const engine = new MintDeskEngine(
+      "shadow",
+      policy,
+      ledger,
+      control,
+      new ReplayPumpEventSource([create, crossing]),
+      oracle(solUsd),
+      { assess },
+      executor,
+      connection(),
+      new RpcRateController(100),
+    );
+
+    await engine.start();
+    const snapshot = engine.snapshot();
+    expect(assess).not.toHaveBeenCalled();
+    expect(executor.calls).toHaveLength(0);
+    expect(snapshot.positions).toHaveLength(0);
+    expect(snapshot.candidates[0]?.phase).toBe("killed");
+    expect(
+      snapshot.events.some(
+        (event) => event.type === "candidate.kill_switch_blocked",
+      ),
+    ).toBe(true);
+    await engine.stop();
+    ledger.close();
+  });
+
+  it("rechecks KILL after Risk before creating a shadow intent", async () => {
+    const { create, crossing, solUsd } = fixture();
+    let releaseRisk!: () => void;
+    let markRiskStarted!: () => void;
+    const riskStarted = new Promise<void>((resolve) => {
+      markRiskStarted = resolve;
+    });
+    const riskReleased = new Promise<void>((resolve) => {
+      releaseRisk = resolve;
+    });
+    const executor = new IncidentExecutor(wallet, "shadow");
+    const ledger = tempLedger();
+    const control = new ControlPlane(ledger, policy);
+    const engine = new MintDeskEngine(
+      "shadow",
+      policy,
+      ledger,
+      control,
+      new ReplayPumpEventSource([]),
+      oracle(solUsd),
+      {
+        async assess(state) {
+          markRiskStarted();
+          await riskReleased;
+          return report(state);
+        },
+      },
+      executor,
+      connection(),
+      new RpcRateController(100),
+    );
+
+    await engine.start();
+    await engine.handleEvent(create);
+    const crossingRun = engine.handleEvent(crossing);
+    await riskStarted;
+    control.engageKillSwitch();
+    releaseRisk();
+    await crossingRun;
+    const snapshot = engine.snapshot();
+    expect(executor.calls).toHaveLength(0);
+    expect(snapshot.positions).toHaveLength(0);
+    expect(snapshot.candidates[0]?.phase).toBe("killed");
+    expect(
+      snapshot.events.some(
+        (event) => event.type === "candidate.kill_switch_blocked",
+      ),
+    ).toBe(true);
+    await engine.stop();
+    ledger.close();
+  });
+
   it("stops a loss and retries only fresh pre-broadcast sell intents", async () => {
     const { create, crossing, solUsd } = fixture();
     const executor = new IncidentExecutor(wallet, "shadow", (_intent, call) => {

@@ -18,6 +18,7 @@ export const policy: PolicyConfig = {
   intentTtlMs: 2_500,
   maxAgeMs: 30_000,
   maxCreatorHolderPct: 5,
+  maxDailyShadowSpendUsdCents: 100_000_000,
   maxDailySpendUsdCents: 5_000,
   maxOpenPositions: 1,
   maxOracleSpreadPct: 1,
@@ -36,12 +37,12 @@ export const policy: PolicyConfig = {
   riskReadinessRetryDelayMs: 75,
   riskTimeoutMs: 900,
   spikeCeilingMarketCapUsd: 4_000,
-  stopLossPct: 15,
-  takeProfitPct: 40,
-  takeProfitSellFraction: 0.5,
+  stopLossPct: 5,
+  takeProfitPct: 20,
+  takeProfitSellFraction: 1,
   timeStopMs: 720_000,
   trailingStopPct: 20,
-  version: 2,
+  version: 3,
 };
 
 export function tempLedger(retentionMs?: number, maxEvents?: number): Ledger {

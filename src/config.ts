@@ -50,6 +50,7 @@ const policySchema = z.object({
   intentTtlMs: z.number().int().positive(),
   maxAgeMs: z.number().int().positive(),
   maxCreatorHolderPct: z.number().min(0).max(100),
+  maxDailyShadowSpendUsdCents: z.number().int().positive(),
   maxDailySpendUsdCents: z.number().int().positive(),
   maxOpenPositions: z.number().int().positive(),
   maxOracleSpreadPct: z.number().positive(),

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { evaluateEntryPolicy } from "../src/core/policy.js";
+import {
+  dailySpendCapUsdCents,
+  evaluateEntryPolicy,
+} from "../src/core/policy.js";
 import { evaluateExit } from "../src/core/exit-policy.js";
 import { loadConfig } from "../src/config.js";
 import type { MintState, Position, PriceMark } from "../src/domain/types.js";
@@ -81,9 +84,9 @@ describe("exit policy", () => {
     wallet: "w",
   };
 
-  it("scales half at forty percent", () => {
-    expect(evaluateExit(position, 4_480, policy, now + 10_000)).toMatchObject({
-      fraction: 0.5,
+  it("exits the full position at twenty percent", () => {
+    expect(evaluateExit(position, 3_840, policy, now + 10_000)).toMatchObject({
+      fraction: 1,
       reason: "take_profit",
       triggered: true,
     });
@@ -125,6 +128,12 @@ describe("exit policy", () => {
 });
 
 describe("configuration", () => {
+  it("keeps the large paper budget separate from the live budget", () => {
+    expect(dailySpendCapUsdCents("shadow", policy)).toBe(100_000_000);
+    expect(dailySpendCapUsdCents("manual", policy)).toBe(5_000);
+    expect(dailySpendCapUsdCents("live", policy)).toBe(5_000);
+  });
+
   it("treats blank optional signer fields as unset and keeps live fail-closed", () => {
     const env = {
       DESK_ARM_TOKEN: "",

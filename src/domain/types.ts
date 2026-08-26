@@ -95,6 +95,7 @@ export interface PolicyConfig {
   intentTtlMs: number;
   maxAgeMs: number;
   maxCreatorHolderPct: number;
+  maxDailyShadowSpendUsdCents: number;
   maxDailySpendUsdCents: number;
   maxOpenPositions: number;
   maxOracleSpreadPct: number;

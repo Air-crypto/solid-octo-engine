@@ -18,7 +18,7 @@ flowchart LR
   PH --> L[(SQLite audit ledger)]
   KP --> L
   PA --> L
-  L --> E[Exit state machine\n-15% initial stop\n50% at +40%\n20% trail / 12m stop]
+  L --> E[Exit state machine\nfull exit at -5% or +20%\n12m time stop]
   E --> L
   H[Head controls\narm / disarm / kill] --> I
   H --> E
@@ -31,10 +31,11 @@ flowchart LR
 - Bonding-curve market-cap computation and a strict crossing rule: below `$3,200` on the previous event, at or above it now, age at most 30 seconds, and high-water market cap still below `$4,000`.
 - Median SOL/USD mark with staleness, source-count, and spread gates. Dexscreener is not in the entry path.
 - On-chain mint/freeze authority, token program, canonical Pump curve owner/PDA, curve-excluded holder concentration, creator holdings, and Rugcheck availability/insider networks. Before graduation, Rugcheck LP metadata is informational because the canonical Pump bonding curve—not an AMM LP position—holds liquidity. Any required entry unknown is a kill.
-- One immutable buy intent per mint, short intent expiry, bounded spend, daily cap, position cap, wallet binding, risk/policy hashes, transaction simulation, and program allowlisting.
+- One immutable buy intent per mint, short intent expiry, bounded spend, mode-specific daily cap, position cap, wallet binding, risk/policy hashes, transaction simulation, and program allowlisting. The default shadow cap is `$1,000,000` for paper testing; the separate manual/live cap remains `$50` and cannot inherit the paper limit during a mode cutover.
 - Durable SQLite ledger in WAL/FULL mode for candidates, risk reports, intents, executions, positions, 30-second portfolio marks, and control state. High-volume operational events are retained for 24 hours and capped at 50,000 rows by default.
-- Exit state machine: close at `-15%` before take-profit, sell half at `+40%`, trail the remainder by `20%`, close at 12 minutes, and allow emergency exits even while new buys are disarmed. The stop is triggered by the latest event-derived bonding-curve market cap, so it bounds engine behavior but cannot guarantee a fill price.
+- Exit state machine: close the full position at `-5%` or `+20%`, close at 12 minutes, and allow emergency exits even while new buys are disarmed. The stop is triggered by the latest event-derived bonding-curve market cap, so it bounds engine behavior but cannot guarantee a fill price. The trailing rule remains only to finish legacy partially scaled positions created under policy version 2.
 - Exit execution uses a separate 10-second TTL and at most three fresh intents at the same 5% slippage cap. Only failures proven to occur before broadcast are retried. An ambiguous broadcast is never repeated automatically; the position stays `closing`, the kill switch engages, and reconciliation becomes an operator action.
+- KILL has identical entry semantics in every mode: it blocks a newly eligible candidate before Risk and rechecks after Risk before any buy intent. Shadow KILL-on candidates are terminal blocked candidates, not paper buys followed by instant paper sells, so they cannot inflate shadow P&L.
 
 ## Quick start
 
@@ -60,7 +61,7 @@ The dashboard has separate shadow, manual, and live books. For each mode it show
 Accounting deliberately distinguishes facts from estimates:
 
 - confirmed live/manual fills use the wallet's native SOL balance delta, token balance delta, transaction fee, signature, and the observed SOL/USD mark;
-- shadow fills use the deterministic requested spend and the bonding-curve market-cap move;
+- shadow fills use the deterministic requested spend and the bonding-curve market-cap move only while KILL is released;
 - open token value and unrealized P&L are estimates from the latest bonding-curve market cap, not a guaranteed executable quote;
 - portfolio marks are stored every 30 seconds as durable financial history. The chart spans the first stored mark through the latest, retains the real time gaps, and exposes timestamp, net worth, total P&L, realized P&L, and unrealized P&L on hover. Long histories are reduced to at most 800 evenly spaced stored marks for display while always preserving the true first and latest mark;
 - positions created before this accounting schema have no reconstructable cost basis. They are labeled legacy, excluded from P&L and net-worth position value, and never silently backfilled with invented numbers.
@@ -128,6 +129,8 @@ Rugcheck's two HTTP requests per risk snapshot do not consume Helius credits. He
 | `shadow` | None                                      |                                           No | Replay, forward paper run, reconciliation         |
 | `manual` | Injected Phantom in the local dashboard   | Only after the user approves the exact popup | Existing Phantom wallet without exporting secrets |
 | `live`   | Dedicated local keypair file, mode `0600` |                Only during a valid arm lease | Bounded automation after shadow/manual validation |
+
+KILL blocks new entries in all three modes but never blocks an exit. Arm leases apply only to live buys and remain capped at 15 minutes by default; do not extend them to unattended multi-day leases.
 
 For manual mode, set `DESK_MODE=manual` and `EXPECTED_SIGNER_PUBLIC_KEY` to the exact Phantom address. Unlock Phantom yourself; the dashboard requests the injected provider and verifies the connected address. It never accepts a password or recovery phrase.
 
