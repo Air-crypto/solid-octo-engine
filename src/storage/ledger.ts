@@ -267,18 +267,33 @@ export class Ledger {
   listPortfolioMarks(
     mode: DeskMode,
     wallet: string,
-    limit = 240,
+    maxPoints = 800,
   ): PortfolioMark[] {
+    const boundedMaxPoints = Math.max(2, Math.floor(maxPoints));
+    const countRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM portfolio_marks
+         WHERE mode = ? AND wallet = ?`,
+      )
+      .get(mode, wallet) as { count: number };
+    const count = Number(countRow.count);
+    if (count === 0) return [];
+    const stride = Math.max(1, Math.ceil((count - 1) / (boundedMaxPoints - 1)));
     const rows = this.db
       .prepare(
-        `SELECT mark_json FROM portfolio_marks
-         WHERE mode = ? AND wallet = ?
-         ORDER BY at_ms DESC LIMIT ?`,
+        `SELECT mark_json FROM (
+           SELECT mark_json,
+                  ROW_NUMBER() OVER (ORDER BY at_ms ASC) AS row_number
+           FROM portfolio_marks
+           WHERE mode = ? AND wallet = ?
+         )
+         WHERE row_number = 1
+            OR row_number = ?
+            OR ((row_number - 1) % ?) = 0
+         ORDER BY row_number ASC`,
       )
-      .all(mode, wallet, limit) as Array<{ mark_json: string }>;
-    return rows
-      .reverse()
-      .map((row) => JSON.parse(row.mark_json) as PortfolioMark);
+      .all(mode, wallet, count, stride) as Array<{ mark_json: string }>;
+    return rows.map((row) => JSON.parse(row.mark_json) as PortfolioMark);
   }
 
   dailySpendUsdCents(sinceMs: number, mode: DeskMode, wallet: string): number {
@@ -337,9 +352,9 @@ export class Ledger {
            WHERE updated_at_ms < ? AND phase IN ('seen', 'killed', 'closed')`,
         )
         .run(cutoffMs);
-      this.db
-        .prepare("DELETE FROM portfolio_marks WHERE at_ms < ?")
-        .run(cutoffMs);
+      // Portfolio marks are financial history, not high-volume operational
+      // telemetry. Keep them from the first recorded mark so the dashboard can
+      // show a complete account curve across restarts and retention windows.
       this.db
         .prepare(
           `DELETE FROM risk_reports

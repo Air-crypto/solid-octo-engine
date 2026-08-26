@@ -145,4 +145,28 @@ describe("ledger idempotency", () => {
     expect(ledger.listPortfolioMarks("live", "wallet-b")).toHaveLength(0);
     ledger.close();
   });
+
+  it("keeps the first and latest portfolio marks when chart history is sampled", () => {
+    const ledger = tempLedger();
+    for (let index = 0; index < 10; index += 1)
+      ledger.savePortfolioMark({
+        atMs: index * 30_000,
+        mode: "live",
+        netWorthUsd: 100 + index,
+        realizedPnlUsd: index,
+        totalPnlUsd: index,
+        unrealizedPnlUsd: 0,
+        wallet: "wallet-a",
+      });
+    const sampled = ledger.listPortfolioMarks("live", "wallet-a", 4);
+    expect(sampled.length).toBeLessThanOrEqual(4);
+    expect(sampled[0]?.atMs).toBe(0);
+    expect(sampled.at(-1)?.atMs).toBe(270_000);
+    expect(sampled.map((mark) => mark.atMs)).toEqual(
+      [...sampled.map((mark) => mark.atMs)].sort((a, b) => a - b),
+    );
+    ledger.pruneOperationalData(1_000_000);
+    expect(ledger.listPortfolioMarks("live", "wallet-a", 20)).toHaveLength(10);
+    ledger.close();
+  });
 });

@@ -397,6 +397,9 @@ button.kill {
   display: block;
   width: 100%;
   min-height: 190px;
+  cursor: crosshair;
+  overflow: visible;
+  touch-action: none;
 }
 .chart text {
   fill: #65717f;
@@ -425,6 +428,50 @@ button.kill {
 .worth-line {
   stroke: #4a9cc9;
   stroke-width: 1.7;
+}
+.chart-canvas {
+  position: relative;
+}
+.chart-crosshair {
+  stroke: #778594;
+  stroke-dasharray: 3 4;
+  stroke-width: 1;
+}
+.chart-dot {
+  stroke: #081016;
+  stroke-width: 2;
+}
+.chart-dot.pnl {
+  fill: #4ee1a1;
+}
+.chart-dot.worth {
+  fill: #4a9cc9;
+}
+.chart-tooltip {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  display: flex;
+  min-width: 190px;
+  padding: 10px 11px;
+  border: 1px solid #34404c;
+  border-radius: 8px;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+  background: rgba(6, 10, 14, 0.96);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42);
+  color: #a8b4c0;
+  font:
+    10px/1.25 ui-monospace,
+    monospace;
+}
+.chart-tooltip time {
+  margin-bottom: 3px;
+  color: #6f7d8a;
+}
+.chart-tooltip strong {
+  color: #4ee1a1;
 }
 .chart-legend {
   display: flex;

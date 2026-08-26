@@ -62,7 +62,7 @@ Accounting deliberately distinguishes facts from estimates:
 - confirmed live/manual fills use the wallet's native SOL balance delta, token balance delta, transaction fee, signature, and the observed SOL/USD mark;
 - shadow fills use the deterministic requested spend and the bonding-curve market-cap move;
 - open token value and unrealized P&L are estimates from the latest bonding-curve market cap, not a guaranteed executable quote;
-- portfolio marks are stored every 30 seconds and retained with the operational retention window;
+- portfolio marks are stored every 30 seconds as durable financial history. The chart spans the first stored mark through the latest, retains the real time gaps, and exposes timestamp, net worth, total P&L, realized P&L, and unrealized P&L on hover. Long histories are reduced to at most 800 evenly spaced stored marks for display while always preserving the true first and latest mark;
 - positions created before this accounting schema have no reconstructable cost basis. They are labeled legacy, excluded from P&L and net-worth position value, and never silently backfilled with invented numbers.
 
 The dashboard is an operational view, not independent proof of custody or profit. Reconcile live signatures and balances against Solana RPC before relying on a result.

@@ -580,7 +580,8 @@ function EquityChart({
   history: PortfolioMark[];
   mode: DeskMode;
 }) {
-  const points = history.slice(-120);
+  const [hoveredAtMs, setHoveredAtMs] = useState<number | null>(null);
+  const points = history;
   if (points.length < 2)
     return (
       <div className="chart-empty">
@@ -597,20 +598,34 @@ function EquityChart({
     .filter((value): value is number => value !== null);
   const pnlRange = paddedRange(pnlValues);
   const worthRange = paddedRange(worthValues);
-  const pnlLine = chartPoints(points, (point) => point.totalPnlUsd, pnlRange);
+  const timeRange = {
+    max: points.at(-1)!.atMs,
+    min: points[0].atMs,
+  };
+  const pnlLine = chartPoints(
+    points,
+    (point) => point.totalPnlUsd,
+    pnlRange,
+    timeRange,
+  );
   const worthLine = chartPoints(
     points,
     (point) => point.netWorthUsd,
     worthRange,
+    timeRange,
   );
-  const first = new Date(points[0].atMs).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const last = new Date(points.at(-1)!.atMs).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const spansMultipleDays = timeRange.max - timeRange.min >= 24 * 60 * 60_000;
+  const first = chartTime(timeRange.min, spansMultipleDays);
+  const last = chartTime(timeRange.max, spansMultipleDays);
+  const hoveredIndex =
+    hoveredAtMs === null ? null : nearestPointIndex(points, hoveredAtMs);
+  const hovered = hoveredIndex === null ? null : points[hoveredIndex]!;
+  const hoverX = hovered ? chartX(hovered.atMs, timeRange) : null;
+  const hoverPnlY = hovered ? chartY(hovered.totalPnlUsd, pnlRange) : null;
+  const hoverWorthY =
+    hovered?.netWorthUsd == null
+      ? null
+      : chartY(hovered.netWorthUsd, worthRange);
   return (
     <div className="chart">
       <div className="chart-legend">
@@ -625,41 +640,95 @@ function EquityChart({
             ? "unavailable"
             : dollars(points.at(-1)!.netWorthUsd)}
         </div>
-        <span>{mode} · last 60 minutes</span>
+        <span>
+          {mode} · full history · {points.length} marks
+        </span>
       </div>
-      <svg
-        aria-label="Portfolio performance history"
-        role="img"
-        viewBox="0 0 900 230"
-      >
-        <line className="chart-grid" x1="54" x2="846" y1="30" y2="30" />
-        <line className="chart-grid" x1="54" x2="846" y1="110" y2="110" />
-        <line className="chart-grid" x1="54" x2="846" y1="190" y2="190" />
-        {worthLine && <polyline className="worth-line" points={worthLine} />}
-        <polyline className="pnl-line" points={pnlLine ?? ""} />
-        <text x="12" y="34">
-          {signedDollars(pnlRange.max)}
-        </text>
-        <text x="12" y="194">
-          {signedDollars(pnlRange.min)}
-        </text>
-        {worthValues.length > 0 && (
-          <>
-            <text className="worth-axis" textAnchor="end" x="890" y="34">
-              {dollars(worthRange.max)}
-            </text>
-            <text className="worth-axis" textAnchor="end" x="890" y="194">
-              {dollars(worthRange.min)}
-            </text>
-          </>
+      <div className="chart-canvas">
+        <svg
+          aria-label="Portfolio performance history from the first stored mark"
+          onPointerLeave={() => setHoveredAtMs(null)}
+          onPointerMove={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const viewX =
+              ((event.clientX - bounds.left) / Math.max(1, bounds.width)) * 900;
+            const ratio = Math.max(0, Math.min(1, (viewX - 54) / 792));
+            const targetAtMs =
+              timeRange.min + ratio * (timeRange.max - timeRange.min);
+            setHoveredAtMs(points[nearestPointIndex(points, targetAtMs)]!.atMs);
+          }}
+          role="img"
+          viewBox="0 0 900 230"
+        >
+          <line className="chart-grid" x1="54" x2="846" y1="30" y2="30" />
+          <line className="chart-grid" x1="54" x2="846" y1="110" y2="110" />
+          <line className="chart-grid" x1="54" x2="846" y1="190" y2="190" />
+          {worthLine && <polyline className="worth-line" points={worthLine} />}
+          <polyline className="pnl-line" points={pnlLine ?? ""} />
+          {hovered && hoverX !== null && hoverPnlY !== null && (
+            <>
+              <line
+                className="chart-crosshair"
+                x1={hoverX}
+                x2={hoverX}
+                y1="30"
+                y2="190"
+              />
+              <circle
+                className="chart-dot pnl"
+                cx={hoverX}
+                cy={hoverPnlY}
+                r="4"
+              />
+              {hoverWorthY !== null && (
+                <circle
+                  className="chart-dot worth"
+                  cx={hoverX}
+                  cy={hoverWorthY}
+                  r="3.5"
+                />
+              )}
+            </>
+          )}
+          <text x="12" y="34">
+            {signedDollars(pnlRange.max)}
+          </text>
+          <text x="12" y="194">
+            {signedDollars(pnlRange.min)}
+          </text>
+          {worthValues.length > 0 && (
+            <>
+              <text className="worth-axis" textAnchor="end" x="890" y="34">
+                {dollars(worthRange.max)}
+              </text>
+              <text className="worth-axis" textAnchor="end" x="890" y="194">
+                {dollars(worthRange.min)}
+              </text>
+            </>
+          )}
+          <text x="54" y="220">
+            {first}
+          </text>
+          <text textAnchor="end" x="846" y="220">
+            {last}
+          </text>
+        </svg>
+        {hovered && hoverX !== null && (
+          <div
+            className="chart-tooltip"
+            style={{
+              left: `${(hoverX / 900) * 100}%`,
+              transform: hoverX > 650 ? "translateX(-100%)" : "translateX(0)",
+            }}
+          >
+            <time>{new Date(hovered.atMs).toLocaleString()}</time>
+            <strong>Total P&amp;L {signedDollars(hovered.totalPnlUsd)}</strong>
+            <span>Net worth {dollars(hovered.netWorthUsd)}</span>
+            <span>Realized {signedDollars(hovered.realizedPnlUsd)}</span>
+            <span>Unrealized {signedDollars(hovered.unrealizedPnlUsd)}</span>
+          </div>
         )}
-        <text x="54" y="220">
-          {first}
-        </text>
-        <text textAnchor="end" x="846" y="220">
-          {last}
-        </text>
-      </svg>
+      </div>
     </div>
   );
 }
@@ -770,17 +839,54 @@ function chartPoints(
   points: PortfolioMark[],
   valueFor: (point: PortfolioMark) => number | null,
   range: { min: number; max: number },
+  timeRange: { min: number; max: number },
 ) {
   const plotted = points
-    .map((point, index) => {
+    .map((point) => {
       const value = valueFor(point);
       if (value === null) return null;
-      const x = 54 + (index / Math.max(1, points.length - 1)) * 792;
-      const y = 190 - ((value - range.min) / (range.max - range.min)) * 160;
+      const x = chartX(point.atMs, timeRange);
+      const y = chartY(value, range);
       return x.toFixed(2) + "," + y.toFixed(2);
     })
     .filter((value): value is string => value !== null);
   return plotted.length < 2 ? null : plotted.join(" ");
+}
+
+function chartX(atMs: number, range: { min: number; max: number }) {
+  return 54 + ((atMs - range.min) / Math.max(1, range.max - range.min)) * 792;
+}
+
+function chartY(value: number, range: { min: number; max: number }) {
+  return 190 - ((value - range.min) / (range.max - range.min)) * 160;
+}
+
+function nearestPointIndex(points: PortfolioMark[], targetAtMs: number) {
+  let low = 0;
+  let high = points.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (points[middle]!.atMs < targetAtMs) low = middle + 1;
+    else high = middle;
+  }
+  if (low === 0) return 0;
+  const before = points[low - 1]!;
+  const after = points[low]!;
+  return targetAtMs - before.atMs <= after.atMs - targetAtMs ? low - 1 : low;
+}
+
+function chartTime(atMs: number, includeDate: boolean) {
+  return new Date(atMs).toLocaleString(
+    [],
+    includeDate
+      ? {
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          month: "short",
+        }
+      : { hour: "2-digit", minute: "2-digit" },
+  );
 }
 
 function paddedRange(values: number[]) {
